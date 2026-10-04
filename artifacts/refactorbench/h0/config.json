@@ -1,0 +1,6 @@
+{
+  "schema_version": "harnessfix.openhands_candidate.v1",
+  "task_id": "refactorbench",
+  "prompt_name": "default",
+  "source_prompt": "D:\\slm-harness-adaptation-reproduce\\tasks\\refactorbench\\prompts\\default.md"
+}

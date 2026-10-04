@@ -1,0 +1,134 @@
+# HarnessFix adapter for Better Harness/OpenHands
+
+This prototype keeps Better Harness responsible for task setup, execution, and
+official evaluation. HarnessFix receives only normalized references to the
+existing OpenHands traces and evaluator results.
+
+## Candidate boundary
+
+Each H0/H1 candidate is a versioned directory with this public contract:
+
+- `agent.py`: required `build_agent(base_dir, llm)` and optional
+  `get_workspace_scripts()` / `get_hook_config(workspace_dir)`.
+- `config.json`: task identity and candidate-owned runtime configuration.
+- `prompts/`, `skills/`, `context/`, `tools/`, `parsers/`, `hooks/`,
+  `verification/`, `subagents/`, `monitoring/`, `workspace_scripts/`: editable
+  component families selected through HarnessFix's operator registry.
+
+Better Harness accepts one `agent_file` in Docker mode. The bridge therefore
+packs the complete candidate directory into a deterministic, self-extracting
+Python launcher. It does not patch Better Harness or OpenHands.
+
+## Model aliases
+
+Merge `better_harness_models.example.yaml` into the Better Harness
+`configs/models.yaml`. The supplied aliases are `gemini-2.5-flash` and
+`qwen-vllm`.
+For self-hosted Qwen, set `VLLM_MODEL=openai/<served-model-name>`,
+`OPENAI_API_BASE`, and `OPENAI_API_KEY` in the Better Harness `.env`, then use
+`qwen-vllm` as `model_name` in its run YAML. HarnessFix analysis/modification
+commands receive the provider-qualified value of `VLLM_MODEL` directly.
+
+## 1. Materialize H0
+
+Run from the HarnessFix repository root. Use `shopping_admin` as the WebArena
+prompt name; the other three task configs currently use `default`.
+
+```powershell
+python -B -m task_agent.openhands_agent.bridge materialize `
+  --better-root D:\path\to\slm-harness-adaptation `
+  --task-id refactorbench `
+  --prompt-name default `
+  --output-dir artifacts\refactorbench\h0
+```
+
+Supported task IDs are `woocommerce_stock_alert_s2l`,
+`machine_operating_s2l`, `refactorbench`, and `webarena`.
+
+## 2. Execute and normalize a split
+
+The bridge preserves the selected Better Harness YAML values, including model,
+data path, prompt, number of responses, and runtime settings. It overrides only
+`agent_file` and `rollout_version`, then invokes the existing `src.collect` and
+`src.evaluate` commands.
+
+```powershell
+python -B -m task_agent.openhands_agent.bridge run `
+  --better-root D:\path\to\slm-harness-adaptation `
+  --base-config tasks\refactorbench\run.yaml `
+  --candidate-dir artifacts\refactorbench\h0 `
+  --rollout-version harnessfix_h0_train `
+  --normalized-output artifacts\refactorbench\train_h0
+```
+
+The normalized directory contains `results.json` plus one
+`traces/<task>__example<N>__rollout<M>/manifest.json` per rollout. The manifest
+references the original filtered/raw trace and embeds the official evaluator
+result. Multiple rollouts also share a stable `<task>__example<N>`
+`task_instance_id` so the aggregate planner can combine their evidence.
+
+## 3. Analyze all failed train rollouts
+
+```powershell
+python -B run_pipeline_openhands.py analyze `
+  --traces-dir artifacts\refactorbench\train_h0\traces `
+  --eval-results artifacts\refactorbench\train_h0\results.json `
+  --agent-source-dir artifacts\refactorbench\h0 `
+  --output-file artifacts\refactorbench\train_h0_analysis.jsonl `
+  --model gemini/gemini-2.5-flash
+```
+
+HTIR pairs actions and observations by `tool_call_id` and adds the official
+score/feedback as the outcome anchor. It intentionally does not synthesize a
+task-state delta from a successful tool observation.
+
+## 4. Plan, modify, and audit
+
+```powershell
+python -B run_pipeline_openhands.py aggregate `
+  --results-file artifacts\refactorbench\train_h0_analysis.jsonl `
+  --output artifacts\refactorbench\plan.md `
+  --spec-output artifacts\refactorbench\plan.json `
+  --model gemini/gemini-2.5-flash
+
+python -B run_pipeline_openhands.py modify `
+  --base-dir artifacts\refactorbench\h0 `
+  --target-dir artifacts\refactorbench\h1 `
+  --plan artifacts\refactorbench\plan.md `
+  --spec artifacts\refactorbench\plan.json `
+  --model gemini/gemini-2.5-flash
+
+python -B run_pipeline_openhands.py audit `
+  --base-dir artifacts\refactorbench\h0 `
+  --candidate-dir artifacts\refactorbench\h1 `
+  --spec artifacts\refactorbench\plan.json `
+  --output artifacts\refactorbench\h1_audit.json
+```
+
+On a later repair round, pass the existing HarnessFix feedback inputs with
+`--val-analyses`, `--prev-plan`, and/or `--prev-iteration-report`. Validation
+failures used this way are development feedback; keep the final test split
+outside the loop.
+
+The audit is the existing HarnessFix plan-to-diff/syntax check extended with
+the OpenHands mode. Official task correctness remains the evaluator's job.
+
+## 5. Paired validation gate
+
+Run H0 and H1 with the same validation YAML, task IDs, model settings, and
+`n_responses`. Because normalized rollout IDs omit the candidate version, H0
+and H1 align on `<task, example, rollout>`. Put those rollout IDs in the
+validation IDs file, one per line, then run:
+
+```powershell
+python -B run_pipeline_openhands.py gate `
+  --baseline-traces artifacts\refactorbench\val_h0\traces `
+  --baseline-eval artifacts\refactorbench\val_h0\results.json `
+  --current-traces artifacts\refactorbench\val_h1\traces `
+  --current-eval artifacts\refactorbench\val_h1\results.json `
+  --ids-file artifacts\refactorbench\val_ids.txt `
+  --plan-spec artifacts\refactorbench\plan.json `
+  --output artifacts\refactorbench\val_gate.json
+```
+
+Keep the final test split outside analysis, repair, and validation retries.

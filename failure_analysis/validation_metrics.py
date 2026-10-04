@@ -336,6 +336,53 @@ def compute_terminal_bench_metrics(traces_dir: str | Path, eval_path: str | Path
     }
     return {"mode": "terminal_bench", "total_instances": total, "metrics": metrics}
 
+
+def compute_openhands_metrics(traces_dir: str | Path, eval_path: str | Path) -> dict[str, Any]:
+    traces_dir = Path(traces_dir)
+    _, eval_data = load_eval_json(eval_path)
+    manifest_files = sorted(traces_dir.glob("*/manifest.json"))
+    total = len(eval_data.get("all_ids", [])) or len(manifest_files)
+    costs: list[float] = []
+    steps: list[int] = []
+    repeated_commands = 0
+    missing_evidence = 0
+
+    for manifest_file in manifest_files:
+        manifest = json.loads(manifest_file.read_text())
+        trace_path_value = manifest.get("trace_path")
+        if not trace_path_value or not Path(trace_path_value).exists():
+            missing_evidence += 1
+            continue
+        trace = json.loads(Path(trace_path_value).read_text())
+        metrics = trace.get("metrics", {}) or {}
+        costs.append(float(metrics.get("accumulated_cost", 0.0) or 0.0))
+        events = trace.get("events", []) or []
+        actions = [event for event in events if event.get("kind") == "ActionEvent"]
+        steps.append(len(actions))
+        commands = [
+            re.sub(r"\s+", " ", json.dumps(event.get("action") or {}, ensure_ascii=False).strip())
+            for event in actions
+        ]
+        if _max_run(commands) >= 4:
+            repeated_commands += 1
+
+    success_rate = len(eval_data.get("resolved_ids", [])) / total if total else 0.0
+    numeric_score = eval_data.get("score_mean")
+    metrics = {
+        "resolved_rate": success_rate,
+        "task_success_rate": success_rate,
+        "accuracy": float(numeric_score) if numeric_score is not None else success_rate,
+        "error_rate": len(eval_data.get("error_ids", [])) / total if total else 0.0,
+        "empty_patch_rate": 0.0,
+        "repeated_command_rate": repeated_commands / total if total else 0.0,
+        "missing_evidence_rate": missing_evidence / total if total else 0.0,
+        "avg_instance_cost": sum(costs) / total if total else 0.0,
+        "avg_steps": sum(steps) / total if total else 0.0,
+        "avg_api_calls": sum(steps) / total if total else 0.0,
+    }
+    return {"mode": "openhands", "total_instances": total, "metrics": metrics}
+
+
 def compute_run_metrics(mode: str, traces_dir: str | Path, eval_path: str | Path) -> dict[str, Any]:
     if mode == "gaia":
         return compute_gaia_metrics(traces_dir, eval_path)
@@ -343,6 +390,8 @@ def compute_run_metrics(mode: str, traces_dir: str | Path, eval_path: str | Path
         return compute_appworld_metrics(traces_dir, eval_path)
     if mode == "terminal_bench":
         return compute_terminal_bench_metrics(traces_dir, eval_path)
+    if mode == "openhands":
+        return compute_openhands_metrics(traces_dir, eval_path)
     return compute_swe_metrics(traces_dir, eval_path)
 
 

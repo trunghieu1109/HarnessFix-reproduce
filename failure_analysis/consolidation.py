@@ -52,18 +52,28 @@ def _default_layers(record: dict[str, Any]) -> list[str]:
     mapping = {
         "system_prompt": "Context and Memory",
         "prompt": "Context and Memory",
+        "skill": "Context and Memory",
+        "context_management": "Context and Memory",
         "web_search": "Tool Interface",
         "tool_use": "Tool Interface",
+        "tool_interface": "Tool Interface",
         "file_handling": "Tool Interface",
         "file_editing": "Tool Interface",
         "api_execution": "Tool Interface",
+        "parser": "Tool Interface",
         "state_guard": "Execution Environment and Sandbox",
+        "state_policy": "Execution Environment and Sandbox",
         "testing": "Verification and Evaluation",
         "validator": "Verification and Evaluation",
+        "verification": "Verification and Evaluation",
         "answer_extraction": "Verification and Evaluation",
         "format_parsing": "Tool Interface",
         "main_loop": "Lifecycle and Orchestration",
         "error_handling": "Lifecycle and Orchestration",
+        "lifecycle_hook": "Lifecycle and Orchestration",
+        "orchestration": "Lifecycle and Orchestration",
+        "runtime_config": "Lifecycle and Orchestration",
+        "monitoring": "Observability",
     }
     return [mapping.get(component, component or "unknown")]
 
@@ -141,6 +151,8 @@ def consolidate_diagnoses(results: list[dict[str, Any]], mode: str, min_frequenc
             evidence_patterns.append(
                 {
                     "instance_id": item.get("instance_id"),
+                    "task_instance_id": item.get("task_instance_id") or item.get("instance_id"),
+                    "rollout_id": item.get("rollout_id"),
                     "affected_component": item.get("affected_component"),
                     "defect_class": item.get("defect_class"),
                     "operator_family": item.get("recommended_operator_family"),
@@ -168,6 +180,12 @@ def consolidate_diagnoses(results: list[dict[str, Any]], mode: str, min_frequenc
                 "operator_distribution": dict(operator_dist.most_common()),
                 "component_distribution": dict(component_dist.most_common()),
                 "frequency": len(items),
+                "task_instance_frequency": len(
+                    {
+                        str(item.get("task_instance_id") or item.get("instance_id"))
+                        for item in items
+                    }
+                ),
                 "severity_distribution": dict(severity_dist),
                 "failure_categories": dict(category_dist),
                 "representative_instances": [item.get("instance_id") for item in representative],
@@ -203,7 +221,9 @@ def format_clusters_for_prompt(clusters: list[dict[str, Any]], max_clusters: int
         layer = cluster.get("implicated_harness_layer", cluster["affected_component"])
         lines.append(
             f"[{cluster['cluster_id']}] scope=layer_only layer={layer} "
-            f"freq={cluster['frequency']} categories={json.dumps(cluster['failure_categories'], ensure_ascii=False)}"
+            f"rollouts={cluster['frequency']} "
+            f"task_instances={cluster.get('task_instance_frequency', cluster['frequency'])} "
+            f"categories={json.dumps(cluster['failure_categories'], ensure_ascii=False)}"
         )
         lines.append(
             f"  defect_distribution: {json.dumps(cluster.get('defect_distribution', {}), ensure_ascii=False)}"
@@ -224,7 +244,8 @@ def format_clusters_for_prompt(clusters: list[dict[str, Any]], max_clusters: int
         evidence_patterns = cluster["evidence_patterns"][:CLUSTER_MAX_EVIDENCE_PER_CLUSTER]
         for evidence in evidence_patterns:
             lines.append(
-                f"  - {evidence['instance_id']}: component={evidence.get('affected_component')} "
+                f"  - {evidence['instance_id']} (task_instance={evidence.get('task_instance_id')}, "
+                f"rollout={evidence.get('rollout_id')}): component={evidence.get('affected_component')} "
                 f"defect={evidence.get('defect_class')} operator={evidence.get('operator_family')} "
                 f"steps={evidence.get('responsible_steps', [])} | "
                 f"{_compact_text(evidence['summary'], CLUSTER_TEXT_FIELD_CHARS)} | "

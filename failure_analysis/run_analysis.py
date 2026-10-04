@@ -38,6 +38,7 @@ sys.path.insert(0, str(REPO_ROOT / "agent_framework" / "src"))
 from failure_analysis.htir import (
     compile_appworld_htir,
     compile_gaia_htir,
+    compile_openhands_htir,
     compile_swe_htir,
     compile_terminal_bench_htir,
     write_bundle,
@@ -72,6 +73,7 @@ CONFIG_PATH_SWE = ANALYSIS_DIR / "analysis_config_swe.yaml"
 CONFIG_PATH_GAIA = ANALYSIS_DIR / "analysis_config_gaia.yaml"
 CONFIG_PATH_APPWORLD = ANALYSIS_DIR / "analysis_config_appworld.yaml"
 CONFIG_PATH_TERMINAL_BENCH = ANALYSIS_DIR / "analysis_config_terminal_bench.yaml"
+CONFIG_PATH_OPENHANDS = ANALYSIS_DIR / "analysis_config_openhands.yaml"
 IMPL_DOC_PATH = ANALYSIS_DIR / "task_agent_impl_doc.md"
 
 DEFAULT_MODEL = "openai/gpt-5-mini"
@@ -122,6 +124,8 @@ def _default_agent_source_dir(mode: str) -> Path:
         return REPO_ROOT / "task_agent" / "appworld_agent" / "src" / "appworld_agent"
     if mode == "terminal_bench":
         return REPO_ROOT / "task_agent" / "terminal_bench_agent"
+    if mode == "openhands":
+        return REPO_ROOT / "task_agent" / "openhands_agent" / "original"
     return REPO_ROOT / "task_agent" / "mini-swe-agent" / "src" / "minisweagent"
 
 
@@ -361,7 +365,7 @@ def _fallback_analysis_output(
         "failure_category": failure_category,
         "exit_status": exit_status or "analysis_failed",
         "api_calls": api_calls,
-        "failure_manifestation": "Analysis agent could not complete a structured diagnosis for this failed SWE-bench instance.",
+        "failure_manifestation": "Analysis agent could not complete a structured diagnosis for this failed instance.",
         "failure_reason": (
             "The trace/evaluation artifacts were available, but the analysis agent did not return valid JSON "
             f"before failing: {reason}"
@@ -470,6 +474,8 @@ def load_config(mode: str = "swe") -> dict:
         config_path = CONFIG_PATH_APPWORLD
     elif mode == "terminal_bench":
         config_path = CONFIG_PATH_TERMINAL_BENCH
+    elif mode == "openhands":
+        config_path = CONFIG_PATH_OPENHANDS
     else:
         config_path = CONFIG_PATH_SWE
     return yaml.safe_load(config_path.read_text())
@@ -1231,12 +1237,148 @@ def _terminal_bench_run_analysis(
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 
+# ── Better Harness / OpenHands SDK mode ─────────────────────────────────────
+
+def _openhands_get_paths(instance_id: str) -> dict[str, str]:
+    manifest_path = _traces_dir() / instance_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    filtered_trace_path = manifest.get("trace_path") or ""
+    raw_trace_path = manifest.get("raw_trace_path") or filtered_trace_path
+    trace_path = filtered_trace_path
+    if not trace_path or not Path(trace_path).exists():
+        trace_path = raw_trace_path
+    return {
+        "manifest_path": str(manifest_path),
+        "traj_path": str(trace_path),
+        "raw_traj_path": str(raw_trace_path),
+        "result_path": str(manifest_path),
+        "report_path": str(manifest_path),
+        "test_output_path": str(manifest_path),
+        "output_path": RESULTS_DIR / f"{instance_id}.traj.json",
+    }
+
+
+def _openhands_manifest(paths: dict[str, str]) -> dict:
+    path = Path(paths["manifest_path"])
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _openhands_evidence_anchor(paths: dict[str, str]) -> dict:
+    manifest = _openhands_manifest(paths)
+    eval_result = manifest.get("eval_result") or {}
+    anchor = {
+        "score": eval_result.get("score"),
+        "feedback": _clean_excerpt(str(eval_result.get("feedback") or "")),
+        "evaluator_status": manifest.get("evaluator_status"),
+        "trace_error": manifest.get("trace_error"),
+        "task_id": manifest.get("task_id"),
+        "task_instance_id": manifest.get("task_instance_id"),
+        "example_index": manifest.get("example_index"),
+        "rollout_id": manifest.get("rollout_id"),
+    }
+    return {key: value for key, value in anchor.items() if value not in (None, "")}
+
+
+def _openhands_task_description(paths: dict[str, str]) -> str:
+    trace_path = Path(paths["traj_path"])
+    if not trace_path.exists():
+        return "(OpenHands task description unavailable: filtered trace missing)"
+    loaded_trace = json.loads(trace_path.read_text())
+    events = loaded_trace.get("events", []) if isinstance(loaded_trace, dict) else loaded_trace
+    for event in events:
+        if event.get("kind") != "MessageEvent" or event.get("source") != "user":
+            continue
+        message = event.get("llm_message") or event.get("message") or {}
+        content = message.get("content") if isinstance(message, dict) else message
+        if isinstance(content, list):
+            return "\n".join(
+                str(item.get("text") or item) if isinstance(item, dict) else str(item)
+                for item in content
+            )
+        return str(content or message)
+    return "(OpenHands task description unavailable in trace)"
+
+
+def _openhands_run_analysis(
+    instance_id: str,
+    failure_category: str,
+    model_name: str,
+    config: dict,
+    impl_doc: str,
+    logger: logging.Logger,
+) -> dict | None:
+    paths = _openhands_get_paths(instance_id)
+    evidence_anchor = _openhands_evidence_anchor(paths)
+    task_description = _openhands_task_description(paths)
+    sanitized_traj_path = write_sanitized_artifact(paths["traj_path"], _sanitized_traj_path(instance_id))
+    htir_bundle = compile_openhands_htir(
+        instance_id=instance_id,
+        failure_category=failure_category,
+        paths=paths,
+        task_description=task_description,
+    )
+    htir_path = write_bundle(htir_bundle, _htir_output_path(instance_id))
+
+    agent_config = _agent_config_from_analysis_config(config)
+    agent_config["output_path"] = paths["output_path"]
+    env_config = config.get("environment", {})
+    model_config = config.get("model", {})
+    model = LitellmTextbasedModel(
+        model_name=model_name,
+        observation_template=model_config.get("observation_template", ""),
+        format_error_template=model_config.get("format_error_template", ""),
+        action_regex=model_config.get("action_regex", ""),
+        model_kwargs=model_config.get("model_kwargs", {}),
+        cost_tracking="ignore_errors",
+    )
+    agent = DefaultAgent(model, _make_analysis_environment(env_config), **agent_config)
+    logger.info(f"Running OpenHands analysis for {instance_id} ({failure_category})")
+    try:
+        result = agent.run(
+            instance_id=instance_id,
+            failure_category=failure_category,
+            traj_path=str(sanitized_traj_path),
+            raw_traj_path=paths["raw_traj_path"],
+            manifest_path=paths["manifest_path"],
+            htir_path=str(htir_path),
+            impl_doc=impl_doc,
+            task_description=task_description,
+            **_agent_source_context("openhands"),
+        )
+    except Exception as exc:
+        logger.error(f"Agent raised exception for {instance_id}: {exc}")
+        return None
+
+    parsed = parse_submission(result.get("submission", ""))
+    if parsed is None:
+        fallback = _fallback_analysis_output(
+            instance_id=instance_id,
+            failure_category=failure_category,
+            exit_status=result.get("exit_status", "analysis_failed"),
+            api_calls=agent.n_calls,
+            reason="OpenHands analysis agent did not return valid JSON",
+            evidence_anchor=evidence_anchor,
+            htir_bundle=htir_bundle,
+            htir_path=htir_path,
+        )
+        manifest = _openhands_manifest(paths)
+        fallback.setdefault("task_instance_id", manifest.get("task_instance_id"))
+        fallback.setdefault("rollout_id", manifest.get("rollout_id"))
+        return fallback
+    parsed.setdefault("instance_id", instance_id)
+    parsed.setdefault("failure_category", failure_category)
+    manifest = _openhands_manifest(paths)
+    parsed.setdefault("task_instance_id", manifest.get("task_instance_id"))
+    parsed.setdefault("rollout_id", manifest.get("rollout_id"))
+    return _enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Batch failure analysis for SWE, GAIA, AppWorld, and Terminal-Bench traces"
+        description="Batch failure analysis for SWE, GAIA, AppWorld, Terminal-Bench, and OpenHands traces"
     )
-    parser.add_argument("--mode", choices=["swe", "gaia", "appworld", "terminal_bench"], default="swe",
-                        help="Analysis mode: swe (default), gaia, appworld, or terminal_bench")
+    parser.add_argument("--mode", choices=["swe", "gaia", "appworld", "terminal_bench", "openhands"], default="swe",
+                        help="Analysis mode: swe (default), gaia, appworld, terminal_bench, or openhands")
     parser.add_argument("--model", "-m", default=DEFAULT_MODEL,
                         help=f"Analysis model name (default: {DEFAULT_MODEL})")
     parser.add_argument("--limit", "-n", type=int, default=None,
@@ -1324,6 +1466,7 @@ def main():
     is_gaia = args.mode == "gaia"
     is_appworld = args.mode == "appworld"
     is_terminal_bench = args.mode == "terminal_bench"
+    is_openhands = args.mode == "openhands"
     if is_gaia:
         _run_one = _gaia_run_analysis
         mode_label = "GAIA"
@@ -1333,6 +1476,9 @@ def main():
     elif is_terminal_bench:
         _run_one = _terminal_bench_run_analysis
         mode_label = "Terminal-Bench"
+    elif is_openhands:
+        _run_one = _openhands_run_analysis
+        mode_label = "Better Harness / OpenHands"
     else:
         _run_one = run_analysis
         mode_label = "SWE-bench"
@@ -1346,6 +1492,8 @@ def main():
         impl_doc = f"(appworld_agent source for this run: {source_context['agent_source_dir']})"
     elif is_terminal_bench:
         impl_doc = f"(harbor terminus-2 source root for this run: {source_context['agent_source_dir']})"
+    elif is_openhands:
+        impl_doc = f"(OpenHands harness bundle source for this run: {source_context['agent_source_dir']})"
     else:
         impl_doc = load_impl_doc(logger) + f"\n\nCurrent analyzed source dir: {source_context['agent_source_dir']}"
 
@@ -1395,6 +1543,8 @@ def main():
             get_p = _appworld_get_paths
         elif is_terminal_bench:
             get_p = _terminal_bench_get_paths
+        elif is_openhands:
+            get_p = _openhands_get_paths
         else:
             get_p = get_paths
         print(f"\n{'='*60}")

@@ -27,7 +27,7 @@ def _resolved_ids(eval_json: Path, subset: set[str]) -> set[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate enhanced agent against a baseline gate")
-    parser.add_argument("--mode", choices=["swe", "gaia", "appworld", "terminal_bench"], default="swe")
+    parser.add_argument("--mode", choices=["swe", "gaia", "appworld", "terminal_bench", "openhands"], default="swe")
     parser.add_argument("--baseline-eval", type=Path, required=True)
     parser.add_argument("--current-eval", type=Path, required=True)
     parser.add_argument("--baseline-traces", type=Path, default=None)

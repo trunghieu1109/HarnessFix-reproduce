@@ -149,7 +149,7 @@ def visualizer(image_path: str, question: str | None = None) -> str:
     import mimetypes
     import os
 
-    import requests
+    from litellm import completion
 
     from .visual_qa import encode_image
 
@@ -163,20 +163,16 @@ def visualizer(image_path: str, question: str | None = None) -> str:
     mime_type, _ = mimetypes.guess_type(image_path)
     base64_image = encode_image(image_path)
 
-    payload = {
-        "model": "gpt-5-mini",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": question},
-                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}},
-                ],
-            }
-        ],
-        "max_tokens": 1000,
-    }
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}"}
+    model_id = os.getenv("HARNESSFIX_VISION_MODEL", "openai/gpt-5-mini")
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": question},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}},
+            ],
+        }
+    ]
     response_json = None
     try:
         from ..tracing import current_model_trace_recorder
@@ -185,20 +181,21 @@ def visualizer(image_path: str, question: str | None = None) -> str:
     except Exception:
         recorder = None
     try:
-        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
-        response_json = response.json()
-        output = response_json["choices"][0]["message"]["content"]
+        response = completion(model=model_id, messages=messages, max_tokens=1000)
+        response_json = response.model_dump() if hasattr(response, "model_dump") else dict(response)
+        choice = response_json.get("choices", [{}])[0]
+        response_message = choice.get("message", {})
+        output = response_message.get("content", "")
         if recorder is not None:
-            choice = response_json.get("choices", [{}])[0]
             recorder.append_call(
                 component="visualizer",
-                model=payload["model"],
-                request_messages=payload["messages"],
-                response_message=choice.get("message", {}),
+                model=model_id,
+                request_messages=messages,
+                response_message=response_message,
                 usage=response_json.get("usage", {}),
                 request_options={
-                    "endpoint": "https://api.openai.com/v1/chat/completions",
-                    "max_tokens": payload["max_tokens"],
+                    "provider_routed_by": "litellm",
+                    "max_tokens": 1000,
                 },
                 raw_response={
                     "id": response_json.get("id"),
@@ -211,13 +208,13 @@ def visualizer(image_path: str, question: str | None = None) -> str:
         if recorder is not None:
             recorder.append_call(
                 component="visualizer",
-                model=payload["model"],
-                request_messages=payload["messages"],
+                model=model_id,
+                request_messages=messages,
                 response_message={},
                 usage={},
                 request_options={
-                    "endpoint": "https://api.openai.com/v1/chat/completions",
-                    "max_tokens": payload["max_tokens"],
+                    "provider_routed_by": "litellm",
+                    "max_tokens": 1000,
                 },
                 raw_response=response_json,
                 error=repr(exc),

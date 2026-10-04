@@ -131,6 +131,8 @@ if [[ -f "$REGISTRY" ]]; then
 import json, shlex
 reg = json.load(open('$REGISTRY'))
 entry = reg.get('$MODEL', {})
+if entry:
+    print('REGISTRY_ENTRY_FOUND=1')
 base = entry.get('api_base', '')
 api_key_env = entry.get('api_key_env', '')
 config_name = entry.get('config_name', '')
@@ -186,6 +188,28 @@ for k, v in overrides.items():
 fi
 
 # -------- 收集其他 -c 覆盖项 --------
+# An arbitrary model name exposed by a self-hosted vLLM server cannot be
+# pre-registered in model_registry.json. When an OpenAI-compatible base URL is
+# configured, use the same text/XML harness contract as the registered models
+# and pass the endpoint explicitly to LiteLLM.
+CUSTOM_OPENAI_BASE="${OPENAI_API_BASE:-${LITELLM_API_BASE:-}}"
+if [[ "$MODEL" == openai/* && -n "$CUSTOM_OPENAI_BASE" && "${REGISTRY_ENTRY_FOUND:-0}" != "1" ]]; then
+  CUSTOM_API_BASE_JSON="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$CUSTOM_OPENAI_BASE")"
+  CONFIG_FILE="swebench_xml.yaml"
+  MODEL_CLASS="litellm_textbased"
+  CONFIG_OVERRIDES+=(
+    "model.model_kwargs.api_base=$CUSTOM_API_BASE_JSON"
+    "model.model_kwargs.stream=false"
+    "model.model_kwargs.timeout=300"
+    "model.model_kwargs.max_retries=0"
+    "model.model_kwargs.drop_params=true"
+    "model.cost_tracking=ignore_errors"
+  )
+  echo "  OpenAI-compatible endpoint: $CUSTOM_OPENAI_BASE"
+  echo "  Config: $CONFIG_FILE (vLLM/OpenAI-compatible fallback)"
+  echo "  Model Class: $MODEL_CLASS (vLLM/OpenAI-compatible fallback)"
+fi
+
 [[ -n "$COST_LIMIT" ]] && CONFIG_OVERRIDES+=("agent.cost_limit=$COST_LIMIT")
 
 # 注意：一旦使用 -c，默认的 swebench.yaml 不会自动加载，必须显式指定

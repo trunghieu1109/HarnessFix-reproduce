@@ -10,7 +10,7 @@ from typing import Any
 
 def _all_relative_files(root: Path) -> set[str]:
     return {
-        str(path.relative_to(root))
+        path.relative_to(root).as_posix()
         for path in root.rglob("*")
         if path.is_file()
         and "__pycache__" not in path.parts
@@ -116,7 +116,7 @@ def audit_candidate(original_dir: Path, candidate_dir: Path, spec: dict[str, Any
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Audit plan-to-diff consistency for a candidate harness")
-    parser.add_argument("--mode", choices=["swe", "gaia", "appworld", "terminal_bench"], required=True)
+    parser.add_argument("--mode", choices=["swe", "gaia", "appworld", "terminal_bench", "openhands"], required=True)
     parser.add_argument("--original-dir", type=Path, required=True)
     parser.add_argument("--candidate-dir", type=Path, required=True)
     parser.add_argument("--spec", type=Path, required=True)

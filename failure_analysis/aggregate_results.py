@@ -76,6 +76,7 @@ TASK_AGENT_SRC_SWE = str(REPO_ROOT / "task_agent" / "mini-swe-agent" / "src" / "
 TASK_AGENT_SRC_GAIA = str(REPO_ROOT / "task_agent" / "open_deep_research" / "src" / "open_deep_research")
 TASK_AGENT_SRC_APPWORLD = str(REPO_ROOT / "task_agent" / "appworld_agent" / "src" / "appworld_agent")
 TASK_AGENT_SRC_TERMINAL_BENCH = str(REPO_ROOT / "task_agent" / "terminal_bench_agent" / "harbor" / "src" / "harbor" / "agents" / "terminus_2")
+TASK_AGENT_SRC_OPENHANDS = str(REPO_ROOT / "task_agent" / "openhands_agent" / "original")
 
 # Legacy alias for backward compat
 TASK_AGENT_SRC = TASK_AGENT_SRC_SWE
@@ -155,6 +156,8 @@ def format_results_for_llm(results: list[dict]) -> str:
         source_dir = _record_source_dir(r)
         lines.append(
             f"[{r.get('instance_id', '?')}] "
+            f"task_instance={r.get('task_instance_id', r.get('instance_id', '?'))} "
+            f"rollout={r.get('rollout_id', '?')} "
             f"cat={r.get('failure_category', '?')} "
             f"exit={r.get('exit_status', '?')} "
             f"component={r.get('affected_component', '?')} "
@@ -794,6 +797,80 @@ Allowed target paths should use `harbor/src/harbor/agents/terminus_2/...` for Te
 """
 
 
+OPENHANDS_SYSTEM_PROMPT = """\
+You are a senior engineer planning scoped repairs to a versioned OpenHands Software Agent SDK harness bundle.
+
+Use the provided harness-layer buckets only as coarse organization. Cluster diagnoses by semantic root cause,
+inspect the active bundle source, then select typed HarnessFix operators. The full candidate surface includes
+agent.py, config.json, prompts, skills, context management, tools, parsers, lifecycle hooks, verification,
+subagents/orchestration, monitoring, and workspace scripts.
+
+Every failed rollout is analyzed. Records sharing task_instance_id are multiple rollouts of the same benchmark
+instance: aggregate their evidence together and do not count repeated rollouts as independent task coverage.
+
+The Better Harness benchmark evaluator, task setup, data, ground truth, OpenHands SDK source, and HarnessFix
+pipeline are protected infrastructure. Never propose changing them. A verification or gate fix must live in
+the candidate harness and must not weaken official scoring.
+
+Candidate source root:
+  {src_dir}
+""".format(src_dir=TASK_AGENT_SRC_OPENHANDS)
+
+
+OPENHANDS_USER_PROMPT_TEMPLATE = """\
+Below are {n} structured failure analyses from Better Harness/OpenHands rollouts.
+
+Failure distribution:
+{distribution}
+
+--- ALL FAILURE ANALYSES ---
+{analyses}
+--- END ---
+{val_regression_section}{prev_plan_section}
+## Your Task
+
+Produce a Markdown improvement plan followed by one fenced JSON implementation spec. Each proposed fix must
+name an operator_family, target_defect_class, concrete target_files/target_symbols, required behavior delta,
+tests, risks, and must-not-change constraints. Paths are relative to the copied OpenHands harness bundle.
+
+The editable universe is broad, but allowed_paths for this iteration must be the narrow union justified by
+the selected operators. Protected infrastructure must appear in forbidden_paths.
+
+Required JSON shape:
+```json
+{{
+  "plan_metadata": {{"round_label": "OpenHands Round", "summary": "...", "global_strategy": "..."}},
+  "edit_budget": {{
+    "recommended_budget": "low|medium|high",
+    "max_files_to_modify": 3,
+    "allowed_paths": ["prompts/**", "skills/**"],
+    "forbidden_paths": ["../task_evals/**", "../task_setups/**", "../data/**", "../failure_analysis/**"],
+    "active_files": [],
+    "must_inspect_files": [],
+    "do_not_edit_until_inspected": true,
+    "rationale": "..."
+  }},
+  "fixes": [{{
+    "id": "fix_1", "title": "...", "priority": "P0",
+    "operator_family": "prompt", "target_defect_class": "context",
+    "target_files": ["prompts/system.md"], "target_symbols": [],
+    "problem_statement": "...", "required_behavior_delta": "...",
+    "implementation_steps": ["..."], "tests": ["..."],
+    "risk_level": "low", "dependencies": [], "regression_risks": ["..."],
+    "must_not_change": ["official evaluator and task environment"]
+  }}]
+}}
+```
+"""
+
+
+OPENHANDS_SPEC_SYSTEM_PROMPT = """\
+Convert an OpenHands harness repair plan into one fenced JSON implementation spec. Candidate paths must be
+relative to the harness bundle and compatible with the typed operator registry. Never target Better Harness
+task evaluators, task setup, datasets, ground truth, OpenHands SDK source, or HarnessFix pipeline code.
+"""
+
+
 SPEC_USER_PROMPT_TEMPLATE = """\
 Convert the following Markdown improvement plan into the required JSON implementation spec.
 
@@ -855,6 +932,8 @@ def _source_roots_for_mode(mode: str, results: list[dict] | None = None) -> list
             str(REPO_ROOT / "task_agent" / "terminal_bench_agent"),
             TASK_AGENT_SRC_TERMINAL_BENCH,
         ])
+    if mode == "openhands":
+        return _ordered_unique(dynamic_roots + [TASK_AGENT_SRC_OPENHANDS])
     return _ordered_unique(dynamic_roots + [TASK_AGENT_SRC_SWE])
 
 
@@ -916,6 +995,23 @@ def _key_files_for_mode(mode: str, results: list[dict] | None = None) -> list[st
             str(root / "harbor" / "src" / "harbor" / "trial" / "trial.py"),
             str(root / "harbor" / "src" / "harbor" / "verifier"),
         ])
+        return _ordered_unique(files)
+    if mode == "openhands":
+        roots = dynamic_roots or [Path(TASK_AGENT_SRC_OPENHANDS)]
+        for root in roots:
+            files.extend([
+                _candidate_source_file(root, ("agent.py",)),
+                _candidate_source_file(root, ("config.json",)),
+                _candidate_source_file(root, ("prompts", "system.md")),
+                _candidate_source_file(root, ("skills",)),
+                _candidate_source_file(root, ("context",)),
+                _candidate_source_file(root, ("tools",)),
+                _candidate_source_file(root, ("hooks",)),
+                _candidate_source_file(root, ("verification",)),
+                _candidate_source_file(root, ("subagents",)),
+                _candidate_source_file(root, ("monitoring",)),
+                _candidate_source_file(root, ("workspace_scripts",)),
+            ])
         return _ordered_unique(files)
     for root in dynamic_roots:
         files.extend([
@@ -1173,6 +1269,9 @@ def generate_spec_from_plan(model: str, plan_text: str, distribution_str: str, n
     elif mode == "terminal_bench":
         spec_system = TERMINAL_BENCH_SPEC_SYSTEM_PROMPT
         src_dir = TASK_AGENT_SRC_TERMINAL_BENCH
+    elif mode == "openhands":
+        spec_system = OPENHANDS_SPEC_SYSTEM_PROMPT
+        src_dir = TASK_AGENT_SRC_OPENHANDS
     else:
         spec_system = SPEC_SYSTEM_PROMPT
         src_dir = TASK_AGENT_SRC_SWE
@@ -1209,8 +1308,8 @@ def load_val_regression_analyses(path: Path) -> list[dict]:
 def main():
     parser = argparse.ArgumentParser(description="Aggregate failure analyses into improvement plan")
     parser.add_argument("--model", "-m", default=DEFAULT_MODEL)
-    parser.add_argument("--mode", choices=["swe", "gaia", "appworld", "terminal_bench"], default="swe",
-                        help="Agent system mode: swe, gaia, appworld, or terminal_bench (default: swe)")
+    parser.add_argument("--mode", choices=["swe", "gaia", "appworld", "terminal_bench", "openhands"], default="swe",
+                        help="Agent system mode: swe, gaia, appworld, terminal_bench, or openhands (default: swe)")
     parser.add_argument("--force", action="store_true", help="Overwrite existing plan file")
     parser.add_argument(
         "--output", "-o", type=Path, default=IMPROVEMENT_PLAN_PATH,
@@ -1252,6 +1351,9 @@ def main():
     elif args.mode == "terminal_bench":
         active_system_prompt = TERMINAL_BENCH_SYSTEM_PROMPT
         active_user_template = TERMINAL_BENCH_USER_PROMPT_TEMPLATE
+    elif args.mode == "openhands":
+        active_system_prompt = OPENHANDS_SYSTEM_PROMPT
+        active_user_template = OPENHANDS_USER_PROMPT_TEMPLATE
     else:
         active_system_prompt = SYSTEM_PROMPT
         active_user_template = USER_PROMPT_TEMPLATE

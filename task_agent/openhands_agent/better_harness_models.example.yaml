@@ -1,0 +1,19 @@
+# Merge these entries into <slm-harness-adaptation>/configs/models.yaml.
+# `name` is the alias used by Better Harness run YAML files. `model` is the
+# provider-qualified model ID passed through DSPy to the OpenHands SDK.
+models:
+  - name: gemini-2.5-flash
+    model: gemini/gemini-2.5-flash
+    api_key: ${GEMINI_API_KEY}
+    max_input_tokens: 1048576
+    max_output_tokens: 65536
+
+  # Self-hosted Qwen through vLLM's OpenAI-compatible /v1 endpoint. Set
+  # VLLM_MODEL=openai/<served-model-name> in Better Harness's .env.
+  - name: qwen-vllm
+    model: ${VLLM_MODEL}
+    api_key: ${OPENAI_API_KEY}
+    api_base: ${OPENAI_API_BASE}
+    max_input_tokens: 204800
+    max_output_tokens: 65536
+    reasoning_effort: none

@@ -1753,6 +1753,361 @@ def compile_terminal_bench_htir(task_id: str, failure_category: str, paths: dict
     })
 
 
+def _openhands_event_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or item))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if isinstance(value, dict):
+        for key in ("text", "content", "message", "output"):
+            if key in value:
+                return _openhands_event_text(value[key])
+    return _json_compact(value, 1200)
+
+
+def _openhands_message_text(event: dict[str, Any]) -> str:
+    message = event.get("llm_message") or event.get("message") or {}
+    if isinstance(message, dict):
+        return _openhands_event_text(message.get("content") or message)
+    return _openhands_event_text(message)
+
+
+def _openhands_action_summary(event: dict[str, Any]) -> str:
+    thought = _openhands_event_text(event.get("thought") or "")
+    action = event.get("action") or {}
+    action_text = _json_compact(action, 900)
+    return _clean_text(" | ".join(part for part in (thought, action_text) if part), 1200)
+
+
+def _openhands_observation_summary(event: dict[str, Any]) -> str:
+    observation = event.get("observation") or {}
+    return _clean_text(_openhands_event_text(observation.get("content") or observation), 1200)
+
+
+def _openhands_component(event: dict[str, Any], summary: str = "") -> str:
+    action = event.get("action") or {}
+    action_kind = str(action.get("kind") or action.get("type") or "").lower()
+    tool_name = str(event.get("tool_name") or action.get("tool_name") or "").lower()
+    text = f"{action_kind} {tool_name} {summary}".lower()
+    if any(token in text for token in ("finish", "complete_task", "submit")):
+        return "submitter"
+    if any(token in text for token in ("delegate", "subagent", "spawn")):
+        return "orchestrator"
+    if any(token in text for token in ("verify", "test", "check")):
+        return "validator"
+    return "tool"
+
+
+def _append_openhands_event_stream(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    stream: list[dict[str, Any]],
+    *,
+    parent_id: str,
+    source_prefix: str,
+    step_offset: int = 0,
+) -> tuple[str, list[str], int]:
+    last_id = parent_id
+    commands: list[str] = []
+    tool_calls: dict[str, str] = {}
+    step_id = step_offset
+    for index, event in enumerate(stream):
+        if not isinstance(event, dict):
+            continue
+        step_id += 1
+        kind = str(event.get("kind") or event.get("type") or "UnknownEvent")
+        source_ref = f"{source_prefix}[{index}]"
+
+        if kind == "SystemPromptEvent":
+            summary = _openhands_event_text(event.get("system_prompt") or event)
+            node_id = f"evt_{len(nodes):03d}"
+            nodes.append(_event(node_id, "ContextAssemblyEvent", step_id, "prompt", summary, source_ref))
+            _add_edge(edges, last_id, node_id, "context-dependency")
+            last_id = node_id
+            continue
+
+        if kind == "MessageEvent":
+            summary = _openhands_message_text(event)
+            node_id = f"evt_{len(nodes):03d}"
+            nodes.append(
+                _event(
+                    node_id,
+                    "ContextAssemblyEvent",
+                    step_id,
+                    "prompt",
+                    summary,
+                    source_ref,
+                    {"source": event.get("source")},
+                )
+            )
+            _add_edge(edges, last_id, node_id, "temporal")
+            last_id = node_id
+            continue
+
+        if kind == "ActionEvent":
+            summary = _openhands_action_summary(event)
+            model_id = f"evt_{len(nodes):03d}"
+            nodes.append(
+                _event(
+                    model_id,
+                    "ModelInvocationEvent",
+                    step_id,
+                    "controller",
+                    summary,
+                    source_ref,
+                    {
+                        "source": event.get("source"),
+                        "thought": event.get("thought"),
+                        "action": event.get("action"),
+                        "tool_name": event.get("tool_name"),
+                        "tool_call_id": event.get("tool_call_id"),
+                    },
+                )
+            )
+            _add_edge(edges, last_id, model_id, "temporal")
+            parser_id = _append_parser_node(
+                nodes,
+                edges,
+                model_id,
+                step_id,
+                f"Parsed OpenHands action kind={(event.get('action') or {}).get('kind', 'unknown')}",
+                f"{source_ref}.action",
+            )
+            component = _openhands_component(event, summary)
+            action_kind = str((event.get("action") or {}).get("kind") or "")
+            if component == "submitter":
+                node_type = "SubmissionEvent"
+            elif component == "orchestrator":
+                node_type = "OrchestrationEvent"
+            else:
+                node_type = "ToolCallEvent"
+            action_id = f"evt_{len(nodes):03d}"
+            nodes.append(
+                _event(
+                    action_id,
+                    node_type,
+                    step_id,
+                    component,
+                    summary or action_kind,
+                    f"{source_ref}.action",
+                    {
+                        "action": event.get("action"),
+                        "tool_name": event.get("tool_name"),
+                        "tool_call_id": event.get("tool_call_id"),
+                    },
+                )
+            )
+            _add_edge(edges, parser_id, action_id, "control-flow")
+            _add_edge(edges, model_id, action_id, "tool-invocation")
+            call_id = event.get("tool_call_id") or (event.get("action") or {}).get("tool_call_id")
+            if call_id:
+                tool_calls[str(call_id)] = action_id
+            commands.append(summary or action_kind)
+            last_id = action_id
+            continue
+
+        if kind == "ObservationEvent":
+            summary = _openhands_observation_summary(event)
+            result_id = f"evt_{len(nodes):03d}"
+            is_error = bool(event.get("is_error") or (event.get("observation") or {}).get("is_error"))
+            nodes.append(
+                _event(
+                    result_id,
+                    "ToolResultRecord",
+                    step_id,
+                    "tool",
+                    summary,
+                    source_ref,
+                    {
+                        "observation": event.get("observation"),
+                        "tool_call_id": (
+                            event.get("tool_call_id")
+                            or (event.get("observation") or {}).get("tool_call_id")
+                        ),
+                        "is_error": is_error,
+                    },
+                )
+            )
+            call_id = str(
+                event.get("tool_call_id")
+                or (event.get("observation") or {}).get("tool_call_id")
+                or ""
+            )
+            if call_id and call_id in tool_calls:
+                _add_edge(edges, tool_calls[call_id], result_id, "tool-invocation")
+            else:
+                _add_edge(edges, last_id, result_id, "temporal")
+            if is_error or _looks_like_exception(summary, ""):
+                exception_id = f"evt_{len(nodes):03d}"
+                nodes.append(_event(exception_id, "ExceptionEvent", step_id, "controller", summary, source_ref))
+                _add_edge(edges, result_id, exception_id, "causal")
+                last_id = exception_id
+            else:
+                last_id = result_id
+            continue
+
+        if "Hook" in kind or kind == "UserRejectObservation":
+            node_type, component = "GuardrailEvent", "controller"
+        elif "Error" in kind or "Exception" in kind:
+            node_type, component = "ExceptionEvent", "controller"
+        else:
+            node_type, component = "OrchestrationEvent", "orchestrator"
+        node_id = f"evt_{len(nodes):03d}"
+        nodes.append(_event(node_id, node_type, step_id, component, _json_compact(event, 1200), source_ref))
+        _add_edge(edges, last_id, node_id, "temporal")
+        last_id = node_id
+    return last_id, commands, step_id
+
+
+def compile_openhands_htir(
+    instance_id: str,
+    failure_category: str,
+    paths: dict[str, str],
+    task_description: str = "",
+) -> dict[str, Any]:
+    """Compile a Better Harness OpenHands SDK trace without inventing state evidence."""
+    manifest = _read_json(paths["manifest_path"])
+    trace_path = manifest.get("trace_path") or paths.get("traj_path")
+    if not trace_path:
+        raise FileNotFoundError(f"No filtered OpenHands trace for {instance_id}")
+    loaded_trace = _read_json(trace_path)
+    trace = loaded_trace if isinstance(loaded_trace, dict) else {"events": loaded_trace}
+    stream = trace.get("events", [])
+    eval_result = manifest.get("eval_result") or {}
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    evaluator_anchors: list[dict[str, Any]] = []
+
+    if not task_description:
+        for event in stream:
+            if isinstance(event, dict) and event.get("kind") == "MessageEvent" and event.get("source") == "user":
+                task_description = _openhands_message_text(event)
+                break
+    nodes.append(
+        _event(
+            "evt_000",
+            "TaskSpecRecord",
+            0,
+            "prompt",
+            task_description or f"OpenHands task {manifest.get('task_id', instance_id)}",
+            "manifest.task/eval_result",
+            {
+                "failure_category": failure_category,
+                "task_id": manifest.get("task_id"),
+                "task_instance_id": manifest.get("task_instance_id"),
+                "example_index": manifest.get("example_index"),
+                "rollout_id": manifest.get("rollout_id"),
+            },
+        )
+    )
+    last_id, commands, last_step = _append_openhands_event_stream(
+        nodes,
+        edges,
+        stream,
+        parent_id="evt_000",
+        source_prefix="trace.events",
+    )
+
+    for agent_id, payload in (trace.get("subagents") or {}).items():
+        orchestration_id = f"evt_{len(nodes):03d}"
+        nodes.append(
+            _event(
+                orchestration_id,
+                "OrchestrationEvent",
+                last_step + 1,
+                "orchestrator",
+                f"OpenHands delegated work to subagent {agent_id}",
+                f"trace.subagents[{agent_id!r}]",
+                {"agent_id": agent_id, "metrics": payload.get("metrics")},
+            )
+        )
+        _add_edge(edges, last_id, orchestration_id, "control-flow")
+        sub_last, sub_commands, last_step = _append_openhands_event_stream(
+            nodes,
+            edges,
+            payload.get("events") or [],
+            parent_id=orchestration_id,
+            source_prefix=f"trace.subagents[{agent_id!r}].events",
+            step_offset=last_step + 1,
+        )
+        last_id = sub_last
+        commands.extend(sub_commands)
+
+    if not any(node.get("type") == "SubmissionEvent" for node in nodes):
+        submission_id = f"evt_{len(nodes):03d}"
+        nodes.append(
+            _event(
+                submission_id,
+                "SubmissionEvent",
+                last_step + 1,
+                "submitter",
+                _clean_text(str(trace.get("eval_output") or "OpenHands run ended without FinishAction"), 1200),
+                "trace.eval_output",
+                {"error": trace.get("error")},
+            )
+        )
+        _add_edge(edges, last_id, submission_id, "causal")
+        last_id = submission_id
+
+    verification_id = f"evt_{len(nodes):03d}"
+    verification_summary = (
+        f"score={eval_result.get('score')}; feedback="
+        f"{_clean_text(str(eval_result.get('feedback') or ''), 900)}"
+    )
+    nodes.append(
+        _event(
+            verification_id,
+            "VerificationEvent",
+            last_step + 2,
+            "validator",
+            verification_summary,
+            "manifest.eval_result",
+            {"eval_result": eval_result, "evaluator_status": manifest.get("evaluator_status")},
+        )
+    )
+    _add_edge(edges, last_id, verification_id, "test-dependency")
+    evaluator_anchors.append(
+        _extract_evaluator_anchor(
+            "manifest.eval_result",
+            verification_summary,
+            {
+                "score": eval_result.get("score"),
+                "failure_category": failure_category,
+                "evaluator_status": manifest.get("evaluator_status"),
+            },
+        )
+    )
+
+    metrics = trace.get("metrics") or {}
+    stats = {
+        "exit_status": "error" if trace.get("error") else ("resolved" if manifest.get("resolved") else "unresolved"),
+        "score": eval_result.get("score"),
+        "error": trace.get("error"),
+        "step_count": sum(1 for node in nodes if node.get("type") == "ModelInvocationEvent"),
+        "subagent_count": len(trace.get("subagents") or {}),
+        "metrics": metrics,
+        "instance_cost": metrics.get("accumulated_cost"),
+        **_repetition_stats(commands),
+    }
+    views = _build_views(nodes, edges, evaluator_anchors)
+    return _finalize_paper_htir(
+        {
+            "mode": "openhands",
+            "instance_id": instance_id,
+            "graph": {"nodes": nodes, "events": nodes, "edges": edges},
+            "evaluator_anchors": evaluator_anchors,
+            "views": views,
+            "stats": stats,
+        }
+    )
+
+
 def _appworld_model_call_summary(message: Any) -> str:
     if isinstance(message, dict):
         return _json_compact(message.get("content") or message, 1200)

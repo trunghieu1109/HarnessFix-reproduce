@@ -55,6 +55,32 @@ OPERATOR_FAMILIES = (
     "gate",
 )
 
+
+# OpenHands candidates are versioned as a complete harness bundle.  These paths
+# are relative to that bundle, not to Better Harness or the OpenHands SDK.  The
+# benchmark setup, evaluator, dataset, and SDK therefore remain outside the
+# editable surface by construction.
+OPENHANDS_ALLOWED_PATHS: dict[str, tuple[str, ...]] = {
+    "guardrail": ("agent.py", "hooks/**", "verification/**"),
+    "prompt": ("prompts/**", "skills/**"),
+    "protocol": ("agent.py", "config.json", "prompts/**", "skills/**", "hooks/**", "verification/**"),
+    "final_output_validator": ("agent.py", "parsers/**", "verification/**", "hooks/**"),
+    "large_observation_guardrail": ("agent.py", "context/**", "hooks/**", "tools/**"),
+    "artifact_hygiene_guardrail": ("agent.py", "hooks/**", "verification/**", "workspace_scripts/**"),
+    "completion_effect_guard": ("agent.py", "hooks/**", "verification/**"),
+    "targeted_verification_prompt": ("prompts/**", "skills/**"),
+    "bounded_tool_search": ("prompts/**", "skills/**", "context/**"),
+    "tool_affordance": ("agent.py", "config.json", "tools/**", "workspace_scripts/**"),
+    "parser": ("agent.py", "parsers/**", "tools/**"),
+    "verification": ("agent.py", "verification/**", "hooks/**", "skills/**"),
+    "context": ("agent.py", "prompts/**", "skills/**", "context/**"),
+    "state": ("agent.py", "config.json", "hooks/**", "tools/**", "workspace_scripts/**"),
+    "memory": ("context/**", "skills/**"),
+    "orchestration": ("agent.py", "subagents/**", "hooks/**"),
+    "instrumentation": ("agent.py", "monitoring/**", "hooks/**"),
+    "gate": ("agent.py", "parsers/**", "verification/**", "hooks/**"),
+}
+
 DEFECT_CLASS_ALIASES = {
     "editing": "tool_affordance",
     "file_editing": "tool_affordance",
@@ -615,11 +641,11 @@ def infer_defect_class(record: dict[str, Any]) -> str:
         or (component in {"main_loop", "error_handling"} and category == "empty_patch")
     ):
         return "termination"
-    if component in {"answer_extraction", "format_parsing"} or any(
+    if component in {"answer_extraction", "format_parsing", "parser"} or any(
         token in text for token in ("json", "schema", "parse", "format", "malformed", "answer extraction", "final_answer")
     ):
         return "parsing"
-    if component in {"testing", "validator"} or any(token in text for token in ("test", "verification", "validator", "checker")):
+    if component in {"testing", "validator", "verification"} or any(token in text for token in ("test", "verification", "validator", "checker")):
         return "verification"
     if any(
         token in text
@@ -638,18 +664,18 @@ def infer_defect_class(record: dict[str, Any]) -> str:
     ):
         return "completion_without_effect"
     if (
-        component in {"state_guard", "api_execution"}
+        component in {"state_guard", "api_execution", "state_policy"}
         or any(token in text for token in ("unsafe mutation", "collateral", "unexpected state", "state mutation"))
     ):
         return "state_mutation"
     if any(token in text for token in ("submission", "submit", "complete_task", "final answer", "handoff", "patch")):
         return "protocol"
-    if component in {"system_prompt", "prompt"} or any(token in text for token in ("context", "truncat", "missing evidence", "prompt")):
+    if component in {"system_prompt", "prompt", "skill", "context_management"} or any(token in text for token in ("context", "truncat", "missing evidence", "prompt")):
         return "context"
-    if any(token in text for token in ("delegate", "subagent", "search_agent", "manager", "worker", "handoff")):
+    if component == "orchestration" or any(token in text for token in ("delegate", "subagent", "search_agent", "manager", "worker", "handoff")):
         return "orchestration"
     if (
-        component in {"tool_use", "file_handling", "web_search", "file_editing"}
+        component in {"tool_use", "tool_interface", "file_handling", "web_search", "file_editing"}
         or any(token in text for token in ("sed", "indentation", "syntaxerror", "api", "file path", "browser", "tool"))
     ):
         return "tool_affordance"
@@ -665,6 +691,18 @@ def recommend_operator_family(record: dict[str, Any]) -> str:
     defect_class = infer_defect_class(record)
     component = str(record.get("affected_component", "")).lower()
 
+    if component == "monitoring":
+        return "instrumentation"
+    if component == "orchestration":
+        return "orchestration"
+    if component == "parser":
+        return "parser"
+    if component == "state_policy":
+        return "state"
+    if component == "tool_interface":
+        return "tool_affordance"
+    if component == "runtime_config":
+        return "protocol"
     if "memory" in text:
         return "memory"
     if "instrument" in text or ("trace" in text and any(token in text for token in ("missing", "coverage", "observability"))):
@@ -690,7 +728,7 @@ def recommend_operator_family(record: dict[str, Any]) -> str:
     if defect_class == "parsing":
         return "parser"
     if defect_class == "verification":
-        return "targeted_verification_prompt" if component in {"system_prompt", "prompt", "testing", "validator"} else "verification"
+        return "targeted_verification_prompt" if component in {"system_prompt", "prompt", "skill", "testing", "validator"} else "verification"
     if defect_class == "protocol":
         return "protocol"
     if defect_class == "context":
@@ -725,6 +763,8 @@ def operator_allowed_paths(mode: str, family: str) -> list[str]:
             "harbor/src/harbor/agents/terminus_2/...",
             "run_terminal_bench_entry.py",
         )
+    elif mode == "openhands":
+        allowed = OPENHANDS_ALLOWED_PATHS[family]
     else:
         allowed = definition.appworld_allowed_paths
     return list(allowed)

@@ -1,0 +1,104 @@
+agent:
+  system_template: |
+    You diagnose failures in OpenHands Software Agent SDK harnesses executed by Better Harness.
+
+    Attribute failures to the editable candidate harness, not to the protected benchmark evaluator,
+    dataset, ground truth, task setup, OpenHands SDK source, or HarnessFix pipeline. Existing evaluator
+    output is an external outcome anchor: a successful tool observation proves only tool execution,
+    while the evaluator score/feedback determines task success.
+
+    Editable component categories:
+    - system_prompt: task-facing instructions under prompts/
+    - skill: reusable guidance under skills/
+    - context_management: context assembly, retention, and observation handling under context/
+    - tool_interface: tool schemas, wrappers, MCP use, and workspace helpers under tools/ and workspace_scripts/
+    - parser: action/final-output parsing under parsers/
+    - lifecycle_hook: guardrails and lifecycle behavior under hooks/
+    - verification: agent-side verification and completion checks under verification/
+    - orchestration: main-agent and subagent coordination under agent.py and subagents/
+    - state_policy: agent-owned state and sandbox policy, never benchmark state or ground truth
+    - monitoring: candidate-owned trace/metric capture under monitoring/
+    - runtime_config: candidate runtime parameters under config.json
+
+    Valid defect classes are termination, tool_affordance, parsing, verification, protocol,
+    context, orchestration, state_mutation, and completion_without_effect.
+
+    Your response must contain exactly one <mswea_bash_command> block per turn.
+
+  instance_template: |
+    Analyze this failed Better Harness/OpenHands rollout.
+
+    Instance: {{instance_id}}
+    Failure category: {{failure_category}}
+    Task:
+    {{task_description}}
+
+    Artifacts:
+    - sanitized filtered trace: {{traj_path}}
+    - raw trace: {{raw_traj_path}}
+    - Better Harness manifest/evaluator result: {{manifest_path}}
+    - HTIR bundle: {{htir_path}}
+    - editable harness source: {{agent_source_dir}}
+
+    Procedure:
+    1. Inspect the manifest and evaluator feedback. Do not reinterpret a FinishAction as success.
+    2. Inspect the sanitized trace and compact HTIR. Pair ActionEvent and ObservationEvent by tool_call_id.
+    3. Inspect only the relevant editable source files before assigning a component.
+    4. Do not propose edits to Better Harness task_setups/task_evals, datasets, ground truth, SDK source,
+       or HarnessFix analysis/gating code.
+    5. Write one JSON diagnosis to /tmp/result_{{instance_id}}.json and submit it.
+
+    Required JSON fields:
+    - instance_id, failure_category, exit_status, api_calls
+    - failure_manifestation, failure_reason, agent_design_issue
+    - affected_component: one editable component category listed above
+    - defect_class
+    - recommended_operator_family: one family from the supplied HarnessFix operator registry
+    - fix_scope: additive_only, prompt_additive, prompt_restrictive, or config_param
+    - severity: low, medium, or high
+    - confidence: low, medium, or high
+
+    Run:
+    ```
+    cat > /tmp/result_{{instance_id}}.json << 'JSONEOF'
+    {
+      "instance_id": "{{instance_id}}",
+      "failure_category": "{{failure_category}}",
+      "exit_status": "FILL",
+      "api_calls": 0,
+      "failure_manifestation": "FILL",
+      "failure_reason": "FILL",
+      "agent_design_issue": "FILL specific editable source component and narrow repair",
+      "affected_component": "FILL",
+      "defect_class": "FILL",
+      "recommended_operator_family": "FILL",
+      "fix_scope": "additive_only",
+      "severity": "medium",
+      "confidence": "medium"
+    }
+    JSONEOF
+    ```
+
+    Submit with:
+    `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/result_{{instance_id}}.json`
+
+step_limit: 30
+cost_limit: 2
+
+model:
+  observation_template: "{{output}}"
+  format_error_template: "Return exactly one <mswea_bash_command> block."
+  action_regex: "<mswea_bash_command>(.*?)</mswea_bash_command>"
+  model_kwargs:
+    temperature: 0.2
+    stream: false
+    timeout: 300
+    max_retries: 0
+    drop_params: true
+
+environment:
+  observation_max_chars: 16000
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    PIP_PROGRESS_BAR: "off"

@@ -38,5 +38,22 @@
       "drop_params": true
     },
     "cost_tracking": "ignore_errors"
+  },
+  "gemini/gemini-2.5-flash": {
+    "max_tokens": 65536,
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 65536,
+    "litellm_provider": "gemini",
+    "mode": "chat",
+    "api_key_env": "GEMINI_API_KEY",
+    "config_name": "swebench_xml.yaml",
+    "model_class": "litellm_textbased",
+    "model_kwargs_override": {
+      "stream": false,
+      "timeout": 300,
+      "max_retries": 0,
+      "drop_params": true
+    },
+    "cost_tracking": "ignore_errors"
   }
 }
