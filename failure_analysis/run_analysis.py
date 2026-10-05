@@ -33,7 +33,7 @@ load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 # ── project-root relative imports ──────────────────────────────────────────────
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "agent_framework" / "src"))
+sys.path.insert(0, str(REPO_ROOT / "task_agent" / "mini-swe-agent" / "src"))
 
 from failure_analysis.htir import (
     compile_appworld_htir,
@@ -54,6 +54,7 @@ from failure_analysis.operator_registry import (
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel
+from task_agent.openhands_agent.model_config_bridge import selected_model_kwargs
 
 import yaml
 
@@ -1328,7 +1329,7 @@ def _openhands_run_analysis(
         observation_template=model_config.get("observation_template", ""),
         format_error_template=model_config.get("format_error_template", ""),
         action_regex=model_config.get("action_regex", ""),
-        model_kwargs=model_config.get("model_kwargs", {}),
+        model_kwargs=model_config.get("model_kwargs", {}) | selected_model_kwargs(),
         cost_tracking="ignore_errors",
     )
     agent = DefaultAgent(model, _make_analysis_environment(env_config), **agent_config)

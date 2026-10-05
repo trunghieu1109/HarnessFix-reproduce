@@ -256,7 +256,7 @@ GEMINI_API_KEY=your-key
 HARNESSFIX_VISION_MODEL=gemini/gemini-2.5-flash
 ```
 
-Use `gemini/gemini-2.5-flash` as the HarnessFix `--model`. If your account exposes another Gemini variant, use its `gemini/<model-name>` ID and update the corresponding Better model entry.
+Use `gemini/gemini-2.5-flash` as `--model` for the original HarnessFix pipelines. The OpenHands bridge in section 8 takes the Better Harness alias instead and reads its model settings from `configs/models.yaml`.
 
 `HARNESSFIX_VISION_MODEL` is used only by GAIA's image tool. A text-only Qwen vLLM deployment cannot handle that tool; point it to Gemini or to a separately served multimodal model. It is not required for the other benchmark tracks.
 
@@ -457,36 +457,33 @@ git -C "$BETTER_ROOT" rev-parse HEAD
 git -C "$HARNESSFIX_ROOT" rev-parse HEAD
 ```
 
-Better Harness loads aliases from `configs/models.yaml`. If that file does not yet exist, install this repository's Gemini/Qwen example; otherwise merge the entries you intend to use:
+Better Harness and the OpenHands analysis, aggregation, and modification stages now read the same model entries from `$BETTER_ROOT/configs/models.yaml`. API keys and base URLs can be literal values in that file or `${VAR}` references resolved from `$BETTER_ROOT/.env` or the environment. Use LiteLLM provider-qualified IDs for OpenAI-compatible endpoints:
 
 ```bash
-mkdir -p "$BETTER_ROOT/configs"
-if [ ! -f "$BETTER_ROOT/configs/models.yaml" ]; then
-  cp "$HARNESSFIX_ROOT/task_agent/openhands_agent/better_harness_models.example.yaml" \
-     "$BETTER_ROOT/configs/models.yaml"
-fi
-cp "$HARNESSFIX_ROOT/.env" "$BETTER_ROOT/.env"
+cat "$BETTER_ROOT/configs/models.yaml"
 ```
 
-The two repositories use different model names in this path:
+Use the alias in both Better run YAML and HarnessFix's OpenHands `--model` option:
 
 | Location | Gemini | Self-hosted Qwen/vLLM |
 |---|---|---|
-| HarnessFix `--model` | `gemini/gemini-2.5-flash` | Value of `VLLM_MODEL`, such as `openai/Qwen/Qwen3-Coder-30B-A3B-Instruct` |
-| Better run YAML `model_name` | `gemini-2.5-flash` | `qwen-vllm` |
+| Model alias | `gemini-3.1-pro-low` | `qwen-vllm` |
+| LiteLLM model ID in Better config | `openai/ag/gemini-3.1-pro-low` | `openai/Qwen/Qwen3.5-9B` |
 
-Edit the selected Better task YAML so `model_name` is one of those aliases. Keep `model_name`, `prompt_name`, `n_responses`, runtime limits, task IDs, and data fixed between H0 and H1.
+Edit the selected Better task YAML so `model_name` is one of those aliases. The `openai/` prefix selects the OpenAI-compatible protocol; it is stripped before the model ID is sent to the configured endpoint. Keep `model_name`, `prompt_name`, `n_responses`, runtime limits, task IDs, and data fixed between H0 and H1.
 
 Build the task images you need:
 
 ```bash
 cd "$BETTER_ROOT"
-BENCHMARK_UID=$(id -u) docker compose build \
+env UID="$(id -u)" docker compose build \
   woocommerce_stock_alert_s2l \
   machine_operating_s2l \
   refactorbench \
   webarena
 ```
+
+The image creates a non-root `appuser` with this UID. If `id -u` prints `0`, run the build and benchmark as a regular host user so the UID is nonzero and mounted workspaces remain writable. For a build-only check while running as root, use `env UID=1000 docker compose build machine_operating_s2l`; the later rollout may still need workspace ownership adjusted for that UID.
 
 Additional task setup remains owned by Better Harness:
 
@@ -522,10 +519,7 @@ Set paths and models:
 cd "$HARNESSFIX_ROOT"
 export TASK=refactorbench
 export PROMPT=default
-set -a
-source .env
-set +a
-export ANALYSIS_MODEL="$VLLM_MODEL"
+export ANALYSIS_MODEL=qwen-vllm  # or gemini-3.1-pro-low
 ```
 
 ### 8.1 Materialize H0
@@ -565,6 +559,7 @@ Better Docker mode mounts one `agent_file`. To preserve a multi-file candidate, 
 
 ```bash
 python -B run_pipeline_openhands.py analyze \
+  --better-root "$BETTER_ROOT" \
   --traces-dir "artifacts/$TASK/train_h0/traces" \
   --eval-results "artifacts/$TASK/train_h0/results.json" \
   --agent-source-dir "artifacts/$TASK/h0" \
@@ -579,12 +574,14 @@ Every failed rollout is analyzed. HTIR pairs OpenHands `ActionEvent` and `Observ
 
 ```bash
 python -B run_pipeline_openhands.py aggregate \
+  --better-root "$BETTER_ROOT" \
   --results-file "artifacts/$TASK/train_h0_analysis.jsonl" \
   --output "artifacts/$TASK/plan_h1.md" \
   --spec-output "artifacts/$TASK/plan_h1.json" \
   --model "$ANALYSIS_MODEL"
 
 python -B run_pipeline_openhands.py modify \
+  --better-root "$BETTER_ROOT" \
   --base-dir "artifacts/$TASK/h0" \
   --target-dir "artifacts/$TASK/h1" \
   --plan "artifacts/$TASK/plan_h1.md" \

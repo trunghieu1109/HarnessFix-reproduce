@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import yaml
+
+from task_agent.openhands_agent.model_config_bridge import load_model, selected_model_kwargs
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -43,7 +46,7 @@ def _modify_candidate(
     shutil.copytree(base_dir, target_dir, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
     config = yaml.safe_load(MODIFY_CONFIG.read_text(encoding="utf-8"))
 
-    sys.path.insert(0, str(REPO_ROOT / "agent_framework" / "src"))
+    sys.path.insert(0, str(REPO_ROOT / "task_agent" / "mini-swe-agent" / "src"))
     from minisweagent.agents.default import DefaultAgent
     from minisweagent.environments.local import LocalEnvironment
     from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel
@@ -59,7 +62,7 @@ def _modify_candidate(
         observation_template=model_config.get("observation_template", ""),
         format_error_template=model_config.get("format_error_template", ""),
         action_regex=model_config.get("action_regex", ""),
-        model_kwargs=model_config.get("model_kwargs", {}),
+        model_kwargs=model_config.get("model_kwargs", {}) | selected_model_kwargs(),
         cost_tracking="ignore_errors",
     )
     result_dir = REPO_ROOT / "enhancement_implementation" / "results"
@@ -98,6 +101,7 @@ def main() -> None:
     analyze.add_argument("--agent-source-dir", type=Path, required=True)
     analyze.add_argument("--output-file", type=Path, required=True)
     analyze.add_argument("--model", required=True)
+    analyze.add_argument("--better-root", type=Path, required=True)
     analyze.add_argument("--workers", type=int, default=1)
 
     aggregate = subparsers.add_parser("aggregate")
@@ -105,6 +109,7 @@ def main() -> None:
     aggregate.add_argument("--output", type=Path, required=True)
     aggregate.add_argument("--spec-output", type=Path, required=True)
     aggregate.add_argument("--model", required=True)
+    aggregate.add_argument("--better-root", type=Path, required=True)
     aggregate.add_argument("--val-analyses", type=Path)
     aggregate.add_argument("--prev-plan", type=Path)
     aggregate.add_argument("--prev-iteration-report", type=Path)
@@ -116,6 +121,7 @@ def main() -> None:
     modify.add_argument("--plan", type=Path, required=True)
     modify.add_argument("--spec", type=Path, required=True)
     modify.add_argument("--model", required=True)
+    modify.add_argument("--better-root", type=Path, required=True)
     modify.add_argument("--redo-feedback", type=Path)
 
     audit = subparsers.add_parser("audit")
@@ -134,6 +140,10 @@ def main() -> None:
     gate.add_argument("--output", type=Path, required=True)
 
     args = parser.parse_args()
+    if args.stage in {"analyze", "aggregate", "modify"}:
+        os.environ["BETTER_HARNESS_ROOT"] = str(args.better_root.resolve())
+        os.environ["HARNESSFIX_MODEL_ALIAS"] = args.model
+        args.model = load_model(args.model)["model"]
     if args.stage == "analyze":
         _run([
             sys.executable,

@@ -29,7 +29,7 @@ load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "agent_framework" / "src"))
+sys.path.insert(0, str(REPO_ROOT / "task_agent" / "mini-swe-agent" / "src"))
 
 from failure_analysis.consolidation import (
     consolidate_diagnoses,
@@ -50,6 +50,7 @@ from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel
 import litellm
+from task_agent.openhands_agent.model_config_bridge import selected_model_kwargs
 
 ALL_RESULTS_PATH = Path(__file__).parent / "results" / "all_results.jsonl"
 IMPROVEMENT_PLANS_DIR = REPO_ROOT / "improvement_plans"
@@ -71,6 +72,8 @@ MODEL_KWARGS = {
     ),
     # api_key is read from OPENAI_API_KEY environment variable (set in .env)
 }
+if os.environ.get("HARNESSFIX_MODEL_ALIAS"):
+    MODEL_KWARGS.update(selected_model_kwargs())
 
 TASK_AGENT_SRC_SWE = str(REPO_ROOT / "task_agent" / "mini-swe-agent" / "src" / "minisweagent")
 TASK_AGENT_SRC_GAIA = str(REPO_ROOT / "task_agent" / "open_deep_research" / "src" / "open_deep_research")

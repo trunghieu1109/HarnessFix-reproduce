@@ -1,0 +1,23 @@
+{
+  "schema_version": "harnessfix.openhands_manifest.v1",
+  "instance_id": "machine_operating_s2l__example0__rollout0",
+  "task_instance_id": "machine_operating_s2l__example0",
+  "task_id": "machine_operating_s2l",
+  "example_index": 0,
+  "rollout_id": 0,
+  "workspace_dir": "/root/slm-harness-adaptation/results/machine_operating_s2l/qwen-vllm_default/rollouts/harnessfix_smoke_qwen_dockercheck_machine_operating_s2l_harnessfix_smoke_qwen_dockercheck_h0_dc6bcdc4e5b3/example0_rollout0",
+  "log_dir": "/root/slm-harness-adaptation/results/machine_operating_s2l/qwen-vllm_default/rollouts/harnessfix_smoke_qwen_dockercheck_machine_operating_s2l_harnessfix_smoke_qwen_dockercheck_h0_dc6bcdc4e5b3/example0_rollout0_logs",
+  "trace_path": "/root/slm-harness-adaptation/results/machine_operating_s2l/qwen-vllm_default/rollouts/harnessfix_smoke_qwen_dockercheck_machine_operating_s2l_harnessfix_smoke_qwen_dockercheck_h0_dc6bcdc4e5b3/example0_rollout0_logs/trace_ef7b01dd-d81d-41f1-b119-f2cfa8acc76b.json",
+  "raw_trace_path": "/root/slm-harness-adaptation/results/machine_operating_s2l/qwen-vllm_default/rollouts/harnessfix_smoke_qwen_dockercheck_machine_operating_s2l_harnessfix_smoke_qwen_dockercheck_h0_dc6bcdc4e5b3/example0_rollout0_logs/raw_trace_ef7b01dd-d81d-41f1-b119-f2cfa8acc76b.json",
+  "eval_results_path": "/root/slm-harness-adaptation/results/machine_operating_s2l/qwen-vllm_default/rollouts/harnessfix_smoke_qwen_dockercheck_machine_operating_s2l_harnessfix_smoke_qwen_dockercheck_h0_dc6bcdc4e5b3/eval_results.yaml",
+  "eval_result": {
+    "workspace_dir": "results/machine_operating_s2l/qwen-vllm_default/rollouts/harnessfix_smoke_qwen_dockercheck_machine_operating_s2l_harnessfix_smoke_qwen_dockercheck_h0_dc6bcdc4e5b3/example0_rollout0",
+    "score": 0.0,
+    "feedback": "Bucket 'iot_anomaly_reports' not found."
+  },
+  "score": 0.0,
+  "success_threshold": 1.0,
+  "resolved": false,
+  "evaluator_status": "agent_error",
+  "trace_error": "Server error '500 Internal Server Error' for url 'http://127.0.0.1:33464/api/conversations/ef7b01dd-d81d-41f1-b119-f2cfa8acc76b/events'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500"
+}

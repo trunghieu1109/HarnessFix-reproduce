@@ -1,0 +1,37 @@
+{
+  "schema_version": "harnessfix.eval_results.v1",
+  "mode": "openhands",
+  "task_id": "machine_operating_s2l",
+  "success_threshold": 1.0,
+  "source_eval_results": "/root/slm-harness-adaptation/results/machine_operating_s2l/qwen-vllm_default/rollouts/harnessfix_smoke_qwen_mcpfix_machine_operating_s2l_harnessfix_smoke_qwen_mcpfix_h0_dc6bcdc4e5b3/eval_results.yaml",
+  "all_ids": [
+    "machine_operating_s2l__example0__rollout0"
+  ],
+  "resolved_ids": [],
+  "unresolved_ids": [],
+  "empty_patch_ids": [],
+  "error_ids": [
+    "machine_operating_s2l__example0__rollout0"
+  ],
+  "unsupported_ids": [],
+  "score_mean": 0.0,
+  "rollout_groups": {
+    "machine_operating_s2l__example0": [
+      "machine_operating_s2l__example0__rollout0"
+    ]
+  },
+  "records": {
+    "machine_operating_s2l__example0__rollout0": {
+      "instance_id": "machine_operating_s2l__example0__rollout0",
+      "task_instance_id": "machine_operating_s2l__example0",
+      "example_index": 0,
+      "rollout_id": 0,
+      "score": 0.0,
+      "resolved": false,
+      "evaluator_status": "agent_error",
+      "feedback": "Bucket 'iot_anomaly_reports' not found.",
+      "workspace_dir": "/root/slm-harness-adaptation/results/machine_operating_s2l/qwen-vllm_default/rollouts/harnessfix_smoke_qwen_mcpfix_machine_operating_s2l_harnessfix_smoke_qwen_mcpfix_h0_dc6bcdc4e5b3/example0_rollout0",
+      "manifest_path": "/root/HarnessFix-reproduce/artifacts/machine_operating_s2l/smoke_h0_mcpfix/traces/machine_operating_s2l__example0__rollout0/manifest.json"
+    }
+  }
+}

@@ -8,3 +8,4 @@ python-dotenv
 pyyaml
 requests
 tqdm
+-e ./task_agent/mini-swe-agent

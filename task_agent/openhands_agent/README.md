@@ -21,13 +21,11 @@ Python launcher. It does not patch Better Harness or OpenHands.
 
 ## Model aliases
 
-Merge `better_harness_models.example.yaml` into the Better Harness
-`configs/models.yaml`. The supplied aliases are `gemini-2.5-flash` and
-`qwen-vllm`.
-For self-hosted Qwen, set `VLLM_MODEL=openai/<served-model-name>`,
-`OPENAI_API_BASE`, and `OPENAI_API_KEY` in the Better Harness `.env`, then use
-`qwen-vllm` as `model_name` in its run YAML. HarnessFix analysis/modification
-commands receive the provider-qualified value of `VLLM_MODEL` directly.
+Both Better Harness and the HarnessFix OpenHands stages read
+`<better-root>/configs/models.yaml`. Use `gemini-3.1-pro-low` or `qwen-vllm`
+as `model_name` in the Better run YAML and as `--model` in HarnessFix analysis,
+aggregation, and modification commands. Pass `--better-root` to those commands.
+Put the referenced API credentials in Better Harness's `.env` or environment.
 
 ## 1. Materialize H0
 
@@ -71,11 +69,12 @@ result. Multiple rollouts also share a stable `<task>__example<N>`
 
 ```powershell
 python -B run_pipeline_openhands.py analyze `
+  --better-root D:\path\to\slm-harness-adaptation `
   --traces-dir artifacts\refactorbench\train_h0\traces `
   --eval-results artifacts\refactorbench\train_h0\results.json `
   --agent-source-dir artifacts\refactorbench\h0 `
   --output-file artifacts\refactorbench\train_h0_analysis.jsonl `
-  --model gemini/gemini-2.5-flash
+  --model gemini-3.1-pro-low
 ```
 
 HTIR pairs actions and observations by `tool_call_id` and adds the official
@@ -86,17 +85,19 @@ task-state delta from a successful tool observation.
 
 ```powershell
 python -B run_pipeline_openhands.py aggregate `
+  --better-root D:\path\to\slm-harness-adaptation `
   --results-file artifacts\refactorbench\train_h0_analysis.jsonl `
   --output artifacts\refactorbench\plan.md `
   --spec-output artifacts\refactorbench\plan.json `
-  --model gemini/gemini-2.5-flash
+  --model gemini-3.1-pro-low
 
 python -B run_pipeline_openhands.py modify `
+  --better-root D:\path\to\slm-harness-adaptation `
   --base-dir artifacts\refactorbench\h0 `
   --target-dir artifacts\refactorbench\h1 `
   --plan artifacts\refactorbench\plan.md `
   --spec artifacts\refactorbench\plan.json `
-  --model gemini/gemini-2.5-flash
+  --model gemini-3.1-pro-low
 
 python -B run_pipeline_openhands.py audit `
   --base-dir artifacts\refactorbench\h0 `

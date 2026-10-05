@@ -1,0 +1,6 @@
+{
+  "schema_version": "harnessfix.openhands_candidate.v1",
+  "task_id": "machine_operating_s2l",
+  "prompt_name": "default",
+  "source_prompt": "/root/slm-harness-adaptation/tasks/machine_operating_s2l/prompts/default.md"
+}
