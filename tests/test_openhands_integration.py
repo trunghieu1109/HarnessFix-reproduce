@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -13,6 +16,7 @@ from failure_analysis.htir import compile_openhands_htir
 from failure_analysis.openhands_io import normalize_rollout
 from failure_analysis.operator_registry import operator_allowed_paths
 from failure_analysis.plan_diff_audit import audit_candidate
+from failure_analysis.validation_metrics import compute_openhands_metrics
 from task_agent.openhands_agent.bridge import pack_candidate
 
 
@@ -170,6 +174,131 @@ class OpenHandsArtifactTests(unittest.TestCase):
             self.assertEqual(normalized["unsupported_ids"], [instance_id])
             self.assertEqual(normalized["error_ids"], [instance_id])
             self.assertNotIn(instance_id, normalized["resolved_ids"])
+
+    def test_compiler_uses_raw_trace_when_filtered_trace_disappears(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            eval_result = _write_trace(root, 0, score=0.0)
+            eval_path = root / "eval_results.yaml"
+            eval_path.write_text(yaml.safe_dump([eval_result]), encoding="utf-8")
+            _, traces_root = normalize_rollout(
+                eval_results_path=eval_path,
+                better_root=root,
+                output_dir=root / "normalized",
+                task_id="refactorbench",
+            )
+            instance_id = "refactorbench__example0__rollout0"
+            manifest_path = traces_root / instance_id / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            Path(manifest["trace_path"]).unlink()
+            bundle = compile_openhands_htir(
+                instance_id,
+                "unresolved",
+                {"manifest_path": str(manifest_path), "traj_path": manifest["raw_trace_path"]},
+            )
+            self.assertTrue(any(node["type"] == "ToolResultRecord" for node in bundle["graph"]["nodes"]))
+            self.assertEqual(bundle["stats"]["score"], 0.0)
+            self.assertIn("Refactor module A.", bundle["graph"]["nodes"][0]["summary"])
+
+    def test_validation_metrics_accept_event_list_traces(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            eval_result = _write_trace(root, 0, score=0.0)
+            eval_path = root / "eval_results.yaml"
+            eval_path.write_text(yaml.safe_dump([eval_result]), encoding="utf-8")
+            results_path, traces_root = normalize_rollout(
+                eval_results_path=eval_path,
+                better_root=root,
+                output_dir=root / "normalized",
+                task_id="refactorbench",
+            )
+            manifest_path = traces_root / "refactorbench__example0__rollout0" / "manifest.json"
+            trace_path = Path(json.loads(manifest_path.read_text())["trace_path"])
+            events = json.loads(trace_path.read_text())["events"]
+            trace_path.write_text(json.dumps(events), encoding="utf-8")
+            metrics = compute_openhands_metrics(traces_root, results_path)["metrics"]
+            self.assertEqual(metrics["resolved_rate"], 0.0)
+            self.assertEqual(metrics["avg_steps"], 2.0)
+            self.assertEqual(metrics["missing_evidence_rate"], 0.0)
+
+
+@unittest.skipUnless(
+    all(importlib.util.find_spec(name) for name in ("litellm", "dotenv", "pydantic")),
+    "Analysis runner dependencies are not installed",
+)
+class OpenHandsAnalysisTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        with patch.dict(os.environ, {"LITELLM_LOCAL_MODEL_COST_MAP": "True"}):
+            from failure_analysis import run_analysis
+
+        cls.runner = run_analysis
+
+    def test_analysis_keeps_rollout_evidence_on_exception_or_invalid_submission(self) -> None:
+        scenarios = (
+            ("exception", RuntimeError("analysis backend unavailable"), ""),
+            ("invalid_json", None, "not a diagnosis JSON"),
+            ("submitted", None, json.dumps({"agent_design_issue": "Inspect the system prompt.", "confidence": "high"})),
+            ("model_alias", None, json.dumps({"agent_design_issue": "Inspect the system prompt.", "confidence": "high"})),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            eval_result = _write_trace(root, 0, score=0.0)
+            eval_path = root / "eval_results.yaml"
+            eval_path.write_text(yaml.safe_dump([eval_result]), encoding="utf-8")
+            _, traces_root = normalize_rollout(
+                eval_results_path=eval_path,
+                better_root=root,
+                output_dir=root / "normalized",
+                task_id="refactorbench",
+            )
+            config = {"model": {"model_kwargs": {"temperature": 0.2}}}
+            logger = logging.getLogger("tests.openhands_analysis")
+            logger.addHandler(logging.NullHandler())
+            logger.propagate = False
+            for name, exception, submission in scenarios:
+                with self.subTest(name=name):
+                    alias_kwargs = {"api_base": "http://localhost:8000/v1", "temperature": 0.0}
+                    agent = Mock(n_calls=3)
+                    agent.run.side_effect = exception
+                    agent.run.return_value = {"exit_status": "Submitted", "submission": submission}
+                    with (
+                        patch.multiple(
+                            self.runner,
+                            _TRACES_DIR_OVERRIDE=traces_root,
+                            _ALL_RESULTS_PATH_OVERRIDE=root / "analysis.jsonl",
+                            RESULTS_DIR=root / "analysis_outputs",
+                        ),
+                        patch.dict(os.environ, {"HARNESSFIX_MODEL_ALIAS": "test-alias" if name == "model_alias" else ""}),
+                        patch.object(self.runner, "DefaultAgent", return_value=agent),
+                        patch.object(self.runner, "LitellmTextbasedModel") as model,
+                        patch.object(self.runner, "selected_model_kwargs", return_value=alias_kwargs) as bridge_kwargs,
+                    ):
+                        result = self.runner._openhands_run_analysis(
+                            "refactorbench__example0__rollout0", "unresolved", "test-model", config, "", logger,
+                        )
+                    self.assertEqual(result["instance_id"], "refactorbench__example0__rollout0")
+                    self.assertEqual(result["task_instance_id"], "refactorbench__example0")
+                    self.assertEqual(result["rollout_id"], 0)
+                    self.assertEqual(result["evidence_anchor"]["score"], 0.0)
+                    self.assertTrue(Path(result["htir_path"]).is_file())
+                    expected_kwargs = config["model"]["model_kwargs"]
+                    if name == "model_alias":
+                        expected_kwargs = expected_kwargs | alias_kwargs
+                        bridge_kwargs.assert_called_once_with()
+                    else:
+                        bridge_kwargs.assert_not_called()
+                    self.assertEqual(model.call_args.kwargs["model_kwargs"], expected_kwargs)
+                    if name == "exception":
+                        self.assertTrue(result["_analysis_fallback"])
+                        self.assertEqual(result["exit_status"], "analysis_agent_exception")
+                        self.assertEqual(result["confidence"], "low")
+                    elif name == "invalid_json":
+                        self.assertTrue(result["_analysis_fallback"])
+                        self.assertTrue(result["_parse_error"])
+                    else:
+                        self.assertFalse(result.get("_analysis_fallback", False))
+                        self.assertEqual(result["confidence"], "high")
 
 
 class OpenHandsBundleTests(unittest.TestCase):

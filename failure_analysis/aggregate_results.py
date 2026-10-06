@@ -800,28 +800,98 @@ Allowed target paths should use `harbor/src/harbor/agents/terminus_2/...` for Te
 """
 
 
+# ── OpenHands mode prompts ────────────────────────────────────────────────────
+
 OPENHANDS_SYSTEM_PROMPT = """\
-You are a senior engineer planning scoped repairs to a versioned OpenHands Software Agent SDK harness bundle.
+You are a senior software engineer analyzing failure patterns in an OpenHands Software Agent SDK harness.
 
-Use the provided harness-layer buckets only as coarse organization. Cluster diagnoses by semantic root cause,
-inspect the active bundle source, then select typed HarnessFix operators. The full candidate surface includes
-agent.py, config.json, prompts, skills, context management, tools, parsers, lifecycle hooks, verification,
-subagents/orchestration, monitoring, and workspace scripts.
+Your job is to:
+1. Use the provided harness-layer buckets as coarse organization only
+2. Within each layer bucket, cluster the individual failure analyses into semantic groups of similar root causes
+3. Inspect the active candidate source and propose concrete, scoped repairs using typed HarnessFix operators
+4. Output a detailed, actionable improvement plan in Markdown followed by a machine-readable JSON spec
 
-Every failed rollout is analyzed. Records sharing task_instance_id are multiple rollouts of the same benchmark
-instance: aggregate their evidence together and do not count repeated rollouts as independent task coverage.
-
-The Better Harness benchmark evaluator, task setup, data, ground truth, OpenHands SDK source, and HarnessFix
-pipeline are protected infrastructure. Never propose changing them. A verification or gate fix must live in
-the candidate harness and must not weaken official scoring.
-
-Candidate source root:
+The candidate harness codebase is at:
   {src_dir}
+Prefer the current analyzed source roots supplied with the records over this default original-bundle path.
+
+Architecture:
+- **Candidate factory** (agent.py): build_agent(base_dir, llm) constructs and returns an openhands.sdk.Agent.
+- **Instructions and context**: prompts/system.md supplies task-facing instructions; skills/ and context/
+  provide reusable guidance and context suffixes when loaded by the active candidate.
+- **Tools and orchestration**: agent.py wires task-appropriate SDK tools, MCP configuration, and any
+  candidate-owned wrappers, lifecycle hooks, verification, or subagents present in the bundle.
+- **Agent execution**: the SDK agent queries the model, parses actions, executes tools, and receives
+  observations. The execution trace records this sequence, including any delegated work.
+- **Task outcome**: the supplied evaluation result reports task success independently of the agent's
+  completion message. FinishAction ends the agent run; evaluator score and feedback determine task success.
+
+Key files and candidate-owned components — propose changes only within this bundle:
+  agent.py                       — build_agent(), tool/MCP wiring, context assembly, orchestration
+  config.json                    — task selection and candidate settings actually read by the active code
+  prompts/system.md              — task-facing system instructions
+  context/system_suffix.md       — additional system context, when loaded
+  context/user_suffix.md         — additional user context, when loaded
+  skills/                        — reusable guidance, when loaded
+  tools/                         — candidate-owned tool schemas and wrappers, when present
+  parsers/                       — candidate-owned action/final-output parsing, when present
+  hooks/                         — lifecycle hooks and guardrails, when present
+  verification/                  — agent-side checks before completion, when present
+  subagents/                     — candidate-owned delegation and coordination, when present
+  monitoring/                    — candidate-owned trace/metric capture, when present
+  workspace_scripts/             — workspace helpers exposed by get_workspace_scripts(), when present
+
+Inspect relevant files and their callers before selecting targets. Do not assume optional components exist
+or that a config key affects execution. A new component must have an explicit integration point in the plan.
+Preserve build_agent(base_dir, llm), its Agent return contract, and any active get_workspace_scripts() or
+get_hook_config(workspace_dir) integration.
+
+IMMUTABLE INFRASTRUCTURE — never propose changes to these:
+  benchmark setup and evaluation code        — task environment and official evaluation (FROZEN)
+  datasets, ground truth, evaluator criteria — benchmark definition and success thresholds (FROZEN)
+  OpenHands SDK and shared tool source        — upstream execution infrastructure (FROZEN)
+  HarnessFix analysis, bridge, eval, pipeline — adaptation and promotion infrastructure (FROZEN)
+
+## CRITICAL: Distinguishing agent completion from task success
+
+A successful tool observation does not establish the requested task outcome. FinishAction records an agent
+completion decision; a message saying "Done" alone does not establish completion or task correctness.
+Use the manifest's evaluator score/feedback as the outcome anchor
+and trace evidence to explain the failure. Verification or gate repairs must live inside the candidate
+harness and preserve official scoring. Do not infer unobserved state changes from a completion message.
+
+Use target metrics computed for this integration: resolved_rate, task_success_rate, accuracy, error_rate,
+repeated_command_rate, missing_evidence_rate, avg_instance_cost, and avg_steps. Do not select the constant
+empty_patch_rate or treat action counts as exact model-call counts.
+
+## CRITICAL: Multiple rollouts of the same task
+
+Every failed rollout is analyzed. Records sharing task_instance_id are repeated rollouts of one benchmark
+instance. Combine their evidence, report both failed-rollout counts and distinct task-instance counts, and
+do not present repeated rollouts as independent task coverage.
+
+Required output structure:
+- Executive Summary: dominant failure patterns, task/rollout coverage, and the repair strategy.
+- Issue Clusters: frequency, evidence anchors, inspected root cause, representative instances, fix scope,
+  operator family, target defect class, concrete files/symbols, behavior delta, and risks to passing tasks.
+- Implementation Priority: rank fixes by task coverage, expected impact, regression risk, and difficulty.
+- Detailed Implementation Plan: files to inspect/change, preconditions, implementation steps, integration,
+  target metrics, focused tests/static checks, regression safeguards, and rollback conditions.
+- Notes for the Modify Agent: dependencies, edit-budget rationale, and compatibility requirements.
+- One fenced JSON spec containing plan_metadata, edit_budget, and fixes. Each fix must include its typed
+  operator/defect labels, active_files, must_inspect_files, behavior delta, tests, and regression constraints.
+
+Prefer the smallest intervention that addresses the observed defect. Use prior plans, validation regressions,
+iteration reports, and repair memory when available. Preserve improvements that worked and explain how the
+new plan avoids recorded regressions. Use train/validation evidence for repair decisions; do not use held-out
+test outcomes. State percentage denominators and account for overlapping coarse harness-layer buckets.
 """.format(src_dir=TASK_AGENT_SRC_OPENHANDS)
 
 
 OPENHANDS_USER_PROMPT_TEMPLATE = """\
-Below are {n} structured failure analyses from Better Harness/OpenHands rollouts.
+Below are {n} structured failure analyses from an OpenHands Software Agent SDK harness evaluation run.
+Each entry identifies the rollout and task instance, failure category, affected component, defect/operator
+labels, evidence anchors, and agent design issue. Referenced artifacts and source files provide full context.
 
 Failure distribution:
 {distribution}
@@ -830,47 +900,253 @@ Failure distribution:
 {analyses}
 --- END ---
 {val_regression_section}{prev_plan_section}
+## CRITICAL RULES — Read Before Writing Any Fix
+
+### Rule 0: Minimum Intervention Principle
+Fix the specific observed failure pattern. Prefer additive safeguards or supported configuration changes
+when they address the defect. For prompt additions or restrictions, explain when the guidance applies and
+how it could affect tasks the baseline already solves. Avoid broad refactors or unrelated behavior changes.
+
+### Rule 1: Evidence before attribution
+Start with official evaluator feedback, then inspect the referenced trace/HTIR and relevant candidate source.
+Pair ActionEvent and ObservationEvent by tool_call_id when available. Distinguish tool execution errors,
+incorrect task effects, premature completion, and missing evidence. Do not turn missing evaluator support
+or missing trace data into an invented task-agent defect.
+Check derived HTIR links and layer labels against trace/source evidence before assigning responsibility.
+An empty state-effect record is not proof that no state changed, and a trace source_ref is not a verified
+implementation location. Inspect the main/subagent return path when a fix depends on delegation order.
+
+### Rule 2: Count task coverage correctly
+Group records by task_instance_id and report the number of distinct tasks as well as failed rollouts.
+State the denominator for every percentage. The supplied coarse harness-layer buckets can overlap; do not
+sum their frequencies as if they were disjoint semantic clusters.
+
+### Rule 3: Inspect the active execution path
+Use bundle-relative paths and real symbols from the current analyzed candidate. Identify where each proposed
+change is loaded or called. List active_files and must_inspect_files, including the factory or caller needed
+to establish that a prompt, hook, tool, parser, or helper affects execution. Match each operator_family and
+target_defect_class to the supplied registry; keep the edit budget narrow and compatible with that operator.
+
+### Rule 4: Completion and verification regression risks
+A completion fix must check the requested outcome using task-appropriate evidence available to the agent.
+Explain how it avoids premature FinishAction, unnecessary repeated verification, or blocking valid completion.
+For tools or state changes, assess accidental writes and collateral damage. Keep benchmark state, evaluator
+logic, ground truth, SDK/shared tool source, and HarnessFix infrastructure outside the editable scope.
+
+### Rule 5: Learn from previous iterations
+Use prior plans, validation regressions, iteration reports, and accepted/rejected repair memory when supplied.
+Preserve behavior that improved results and explain how each new intervention addresses recorded regressions.
+Use train and validation evidence for planning; held-out test outcomes must not become repair instructions.
+
 ## Your Task
 
-Produce a Markdown improvement plan followed by one fenced JSON implementation spec. Each proposed fix must
-name an operator_family, target_defect_class, concrete target_files/target_symbols, required behavior delta,
-tests, risks, and must-not-change constraints. Paths are relative to the copied OpenHands harness bundle.
+Produce a comprehensive improvement plan in Markdown followed by one JSON spec block with this structure:
 
-The editable universe is broad, but allowed_paths for this iteration must be the narrow union justified by
-the selected operators. Protected infrastructure must appear in forbidden_paths.
+# Agent Improvement Plan — OpenHands Analysis
 
-Required JSON shape:
+## Executive Summary
+(2-3 sentences: dominant failure patterns, failed-rollout and distinct-task coverage, and the repair strategy)
+
+## Issue Clusters
+
+For each semantic cluster (ordered by frequency/impact, most important first):
+
+### Cluster N: <Short Name>
+- **Affected component and harness layer**: <editable component and implicated layer>
+- **Frequency**: X failed rollouts across Y distinct task instances (percentages with stated denominators)
+- **Failure categories**: empty_patch / unresolved / error / regressed (use categories actually present)
+- **Evidence anchors**: shared evaluator feedback, action/observation pattern, and relevant trace/HTIR references
+- **Root cause**: (2-3 sentences connecting the observed failure to an inspected candidate design decision)
+- **Representative instances**: (list 2-3 rollout IDs, task_instance_id values, and one-line descriptions)
+- **Fix scope**: additive_only / prompt_additive / prompt_restrictive / config_param
+- **Operator family and target defect class**: (values from the supplied registry)
+- **Proposed fix**:
+  - Target files and symbols: <concrete paths relative to the candidate bundle and actual symbols>
+  - Current behavior: (what the inspected code or instructions currently do)
+  - New behavior: (the specific behavior change and its activation condition)
+  - Impact on passing tasks: (which existing task behaviors might be affected and how they are preserved)
+  - Regression risk assessment: (premature completion, over-verification, tool/state effects, or context loss)
+  - Implementation sketch: (pseudocode or a concrete snippet, including wiring for any new component)
+
+## Implementation Priority
+
+| Priority | Cluster | Estimated Impact | Regression Risk | Implementation Difficulty |
+|----------|---------|------------------|-----------------|---------------------------|
+| P0 | ... | distinct tasks / failed rollouts | low/medium/high | ... |
+| P1 | ... | ... | ... | ... |
+
+## Detailed Implementation Plan
+
+For each fix (same order as above), provide:
+
+### Fix N: <Name>
+**Files to modify**: concrete bundle-relative paths
+**Files to inspect first**: active targets, callers, and nearby prompt/config/parser/finalizer files
+**Preconditions**: trace evidence and source behavior that justify applying this fix
+**Step-by-step implementation**:
+1. (specific change to a real file/symbol)
+2. (integration or behavior check)
+**Expected outcome**: (which observed failure mode should be reduced)
+**Target metrics**: (supported registry metrics and the expected direction of improvement)
+**Tests and static checks**: (syntax, factory contract, focused behavior checks, and train/validation comparison)
+**Regression safeguard**: (passing-task behavior and integration contracts that must be preserved)
+**Rollback conditions**: (specific regressions or failed checks that should reject the candidate)
+
+## Notes for the Modify Agent
+(Implementation order, dependencies, edit-budget rationale, and compatibility concerns. Preserve
+build_agent(base_dir, llm) returning an SDK Agent and any active optional workspace-script/hook contracts.)
+
+After the Markdown plan, output the JSON spec block with this schema:
+
 ```json
 {{
-  "plan_metadata": {{"round_label": "OpenHands Round", "summary": "...", "global_strategy": "..."}},
+  "plan_metadata": {{
+    "round_label": "OpenHands Round Analysis",
+    "summary": "short summary",
+    "global_strategy": "how the modify agent should prioritize changes"
+  }},
   "edit_budget": {{
     "recommended_budget": "low|medium|high",
     "max_files_to_modify": 3,
-    "allowed_paths": ["prompts/**", "skills/**"],
-    "forbidden_paths": ["../task_evals/**", "../task_setups/**", "../data/**", "../failure_analysis/**"],
-    "active_files": [],
-    "must_inspect_files": [],
+    "allowed_paths": ["prompts/system.md"],
+    "forbidden_paths": [
+      "../task_evals/**", "../task_setups/**", "../data/**", "../ground_truth/**",
+      "../software-agent-sdk/**", "../eval/**", "../failure_analysis/**"
+    ],
+    "active_files": ["prompts/system.md"],
+    "must_inspect_files": ["agent.py", "config.json", "prompts/system.md"],
     "do_not_edit_until_inspected": true,
-    "rationale": "..."
+    "rationale": "why this budget and these paths are appropriate for the selected fixes"
   }},
-  "fixes": [{{
-    "id": "fix_1", "title": "...", "priority": "P0",
-    "operator_family": "prompt", "target_defect_class": "context",
-    "target_files": ["prompts/system.md"], "target_symbols": [],
-    "problem_statement": "...", "required_behavior_delta": "...",
-    "implementation_steps": ["..."], "tests": ["..."],
-    "risk_level": "low", "dependencies": [], "regression_risks": ["..."],
-    "must_not_change": ["official evaluator and task environment"]
-  }}]
+  "fixes": [
+    {{
+      "id": "fix_1",
+      "title": "short name",
+      "priority": "P0|P1|P2",
+      "operator_family": "prompt",
+      "target_defect_class": "context",
+      "fix_scope": "prompt_additive",
+      "target_files": ["prompts/system.md"],
+      "target_symbols": [],
+      "active_files": ["prompts/system.md"],
+      "must_inspect_files": ["agent.py", "config.json", "prompts/system.md"],
+      "do_not_edit_until_inspected": true,
+      "preconditions": ["observed failure and inspected source behavior that justify the intervention"],
+      "problem_statement": "current behavior and failure mode",
+      "required_behavior_delta": "what must change and when the change applies",
+      "implementation_steps": ["step 1", "step 2"],
+      "tests": ["focused verification step"],
+      "target_metrics": ["resolved_rate"],
+      "static_checks": ["check the edited component and its integration contract"],
+      "rollback_conditions": ["specific regression or failed check"],
+      "risk_level": "low|medium|high",
+      "dependencies": [],
+      "regression_risks": ["specific passing-task behavior that could be harmed"],
+      "must_not_change": [
+        "build_agent(base_dir, llm) returning an openhands.sdk.Agent",
+        "official evaluator, task setup, datasets, ground truth, SDK source, and HarnessFix pipeline"
+      ]
+    }}
+  ]
 }}
 ```
+
+The paths, operator labels, metric names, and budget above illustrate the schema. Replace them with the
+minimal concrete targets justified by the plan and registry. Use actual Python symbols for code fixes;
+target_symbols may be empty for Markdown/config-only fixes. All editable paths must stay inside the copied
+candidate bundle. Protect external infrastructure regardless of where it is located on disk.
 """
 
 
 OPENHANDS_SPEC_SYSTEM_PROMPT = """\
-Convert an OpenHands harness repair plan into one fenced JSON implementation spec. Candidate paths must be
-relative to the harness bundle and compatible with the typed operator registry. Never target Better Harness
-task evaluators, task setup, datasets, ground truth, OpenHands SDK source, or HarnessFix pipeline code.
+You are converting an already-written OpenHands SDK harness improvement plan into a machine-readable
+implementation spec for a copied harness bundle.
+
+Return exactly one fenced code block:
+
+```json
+{ ... }
+```
+
+The JSON object MUST follow this schema:
+{
+  "plan_metadata": {
+    "round_label": "OpenHands Round Analysis",
+    "summary": "short summary",
+    "global_strategy": "how the modify agent should prioritize changes"
+  },
+  "edit_budget": {
+    "recommended_budget": "low|medium|high",
+    "max_files_to_modify": 3,
+    "allowed_paths": ["prompts/system.md"],
+    "forbidden_paths": [
+      "../task_evals/**", "../task_setups/**", "../data/**", "../ground_truth/**",
+      "../software-agent-sdk/**", "../eval/**", "../failure_analysis/**"
+    ],
+    "active_files": ["prompts/system.md"],
+    "must_inspect_files": ["agent.py", "config.json", "prompts/system.md"],
+    "do_not_edit_until_inspected": true,
+    "rationale": "why this budget and these paths are appropriate for the selected fixes"
+  },
+  "fixes": [
+    {
+      "id": "fix_1",
+      "title": "short name",
+      "priority": "P0|P1|P2",
+      "operator_family": "prompt",
+      "target_defect_class": "context",
+      "fix_scope": "prompt_additive",
+      "target_files": ["prompts/system.md"],
+      "target_symbols": [],
+      "active_files": ["prompts/system.md"],
+      "must_inspect_files": ["agent.py", "config.json", "prompts/system.md"],
+      "do_not_edit_until_inspected": true,
+      "preconditions": ["observed failure and inspected source behavior that justify the intervention"],
+      "problem_statement": "current behavior and failure mode",
+      "required_behavior_delta": "what must change and when the change applies",
+      "implementation_steps": ["step 1", "step 2"],
+      "tests": ["focused verification step"],
+      "target_metrics": ["resolved_rate"],
+      "static_checks": ["check the edited component and its integration contract"],
+      "rollback_conditions": ["specific regression or failed check"],
+      "risk_level": "low|medium|high",
+      "dependencies": [],
+      "regression_risks": ["specific passing-task behavior that could be harmed"],
+      "must_not_change": [
+        "build_agent(base_dir, llm) returning an openhands.sdk.Agent",
+        "official evaluator, task setup, datasets, ground truth, SDK source, and HarnessFix pipeline"
+      ]
+    }
+  ]
+}
+
+Rules:
+- Output valid JSON only inside the fenced block. Do not add explanatory text outside it.
+- Every fix must map to concrete files, real symbols, and behavior deltas already justified by the plan.
+  Preserve the plan's operator_family, target_defect_class, metrics, and safeguards; do not invent new fixes.
+- The example paths, labels, metrics, and budget are illustrative; replace them with the plan's targets.
+- All editable paths must be relative to the candidate bundle, such as agent.py, config.json, or a concrete
+  file under prompts/, skills/, context/, tools/, parsers/, hooks/, verification/, subagents/, monitoring/,
+  or workspace_scripts/. Never use absolute paths, parent traversal, or repository-root prefixes for edits.
+- Keep allowed_paths minimal and compatible with the selected typed operators. The budget must cover the
+  union of target files, including integration changes needed for any new component.
+- active_files must identify the files on the execution path to change. must_inspect_files must include
+  those files and the relevant factory/callers, prompts, config, parsers, or finalizers needed to prove the
+  path is active. Set do_not_edit_until_inspected to true at both budget and fix level.
+- target_symbols must name actual Python symbols for code fixes; an empty list is valid for Markdown/config.
+- Never target benchmark setup/evaluators, datasets, ground truth, OpenHands SDK/shared tool source,
+  or HarnessFix analysis, bridge, eval, or pipeline code. Record protected paths in forbidden_paths and keep
+  this infrastructure frozen regardless of its disk location. Gate/verification fixes are candidate-owned
+  completion checks and must preserve official scoring and success thresholds.
+- Preserve build_agent(base_dir, llm) returning an openhands.sdk.Agent, task-appropriate tool/MCP access,
+  and any active get_workspace_scripts() or get_hook_config(workspace_dir) integration.
+- regression_risks must describe concrete passing-task effects for prompt/context changes, premature
+  completion or over-verification for completion changes, and collateral damage for tool/state changes.
+- target_metrics must be computed for this integration: resolved_rate, task_success_rate, accuracy,
+  error_rate, repeated_command_rate, missing_evidence_rate, avg_instance_cost, or avg_steps.
+  Do not substitute unavailable registry metrics or the constant empty_patch_rate.
+- Preserve train/validation safeguards and rollback conditions from the plan. Repeated rollout evidence
+  must not be rewritten as independent task coverage, and held-out test results must not guide repairs.
 """
 
 

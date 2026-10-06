@@ -353,7 +353,8 @@ def compute_openhands_metrics(traces_dir: str | Path, eval_path: str | Path) -> 
         if not trace_path_value or not Path(trace_path_value).exists():
             missing_evidence += 1
             continue
-        trace = json.loads(Path(trace_path_value).read_text())
+        loaded_trace = json.loads(Path(trace_path_value).read_text())
+        trace = loaded_trace if isinstance(loaded_trace, dict) else {"events": loaded_trace}
         metrics = trace.get("metrics", {}) or {}
         costs.append(float(metrics.get("accumulated_cost", 0.0) or 0.0))
         events = trace.get("events", []) or []

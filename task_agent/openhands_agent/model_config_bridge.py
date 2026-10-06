@@ -15,26 +15,29 @@ def load_model(alias: str) -> dict:
     model = {entry["name"]: entry for entry in models}[alias]
     dotenv = dotenv_values(better_root / ".env")
 
-    def resolve(value: str) -> str:
-        if value.startswith("${") and value.endswith("}"):
+    def resolve(value):
+        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
             name = value[2:-1]
             return dotenv[name] if name in dotenv else os.environ[name]
         return value
 
     resolved = {
-        "model": model["model"],
+        "model": resolve(model["model"]),
         "api_base": resolve(model["api_base"]),
         "api_key": resolve(model["api_key"]),
-        "reasoning_effort": model["reasoning_effort"],
-        "max_input_tokens": model["max_input_tokens"],
-        "max_output_tokens": model["max_output_tokens"],
+        "reasoning_effort": resolve(model["reasoning_effort"]),
+        "max_input_tokens": int(resolve(model["max_input_tokens"])),
+        "max_output_tokens": int(resolve(model["max_output_tokens"])),
     }
+    if "temperature" in model:
+        resolved["temperature"] = float(resolve(model["temperature"]))
+    provider = litellm.get_llm_provider(resolved["model"])[1]
     litellm.register_model({
         resolved["model"]: {
             "max_tokens": resolved["max_input_tokens"],
             "max_input_tokens": resolved["max_input_tokens"],
             "max_output_tokens": resolved["max_output_tokens"],
-            "litellm_provider": "openai",
+            "litellm_provider": provider,
             "mode": "chat",
         }
     })
@@ -43,8 +46,12 @@ def load_model(alias: str) -> dict:
 
 def selected_model_kwargs() -> dict:
     model = load_model(os.environ["HARNESSFIX_MODEL_ALIAS"])
-    return {
+    kwargs = {
         "api_base": model["api_base"],
         "api_key": model["api_key"],
         "reasoning_effort": model["reasoning_effort"],
+        "max_tokens": model["max_output_tokens"],
     }
+    if "temperature" in model:
+        kwargs["temperature"] = model["temperature"]
+    return kwargs

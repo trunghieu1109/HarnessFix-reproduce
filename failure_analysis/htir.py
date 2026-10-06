@@ -1971,11 +1971,17 @@ def compile_openhands_htir(
     paths: dict[str, str],
     task_description: str = "",
 ) -> dict[str, Any]:
-    """Compile a Better Harness OpenHands SDK trace without inventing state evidence."""
+    """Compile an OpenHands SDK trace without inventing state evidence."""
     manifest = _read_json(paths["manifest_path"])
-    trace_path = manifest.get("trace_path") or paths.get("traj_path")
+    trace_path = next(
+        (
+            path for path in (manifest.get("trace_path"), paths.get("traj_path"), manifest.get("raw_trace_path"))
+            if path and Path(path).is_file()
+        ),
+        None,
+    )
     if not trace_path:
-        raise FileNotFoundError(f"No filtered OpenHands trace for {instance_id}")
+        raise FileNotFoundError(f"No OpenHands trace for {instance_id}")
     loaded_trace = _read_json(trace_path)
     trace = loaded_trace if isinstance(loaded_trace, dict) else {"events": loaded_trace}
     stream = trace.get("events", [])

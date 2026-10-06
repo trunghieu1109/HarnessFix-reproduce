@@ -1,0 +1,23 @@
+{
+  "schema_version": "harnessfix.openhands_manifest.v1",
+  "instance_id": "woocommerce_stock_alert_s2l__example0__rollout0",
+  "task_instance_id": "woocommerce_stock_alert_s2l__example0",
+  "task_id": "woocommerce_stock_alert_s2l",
+  "example_index": 0,
+  "rollout_id": 0,
+  "workspace_dir": "/root/slm-harness-adaptation-reproduce/results/woocommerce_stock_alert_s2l/qwen_default/rollouts/sample_20261006T080922Z_woocommerce_stock_alert_s2l_sample_20261006T080922Z_H0_66f1634c52e1/example0_rollout0",
+  "log_dir": "/root/slm-harness-adaptation-reproduce/results/woocommerce_stock_alert_s2l/qwen_default/rollouts/sample_20261006T080922Z_woocommerce_stock_alert_s2l_sample_20261006T080922Z_H0_66f1634c52e1/example0_rollout0_logs",
+  "trace_path": "/root/slm-harness-adaptation-reproduce/results/woocommerce_stock_alert_s2l/qwen_default/rollouts/sample_20261006T080922Z_woocommerce_stock_alert_s2l_sample_20261006T080922Z_H0_66f1634c52e1/example0_rollout0_logs/trace_cadab634-e4be-453d-a122-6a181e540a5e.json",
+  "raw_trace_path": "/root/slm-harness-adaptation-reproduce/results/woocommerce_stock_alert_s2l/qwen_default/rollouts/sample_20261006T080922Z_woocommerce_stock_alert_s2l_sample_20261006T080922Z_H0_66f1634c52e1/example0_rollout0_logs/raw_trace_cadab634-e4be-453d-a122-6a181e540a5e.json",
+  "eval_results_path": "/root/slm-harness-adaptation-reproduce/results/woocommerce_stock_alert_s2l/qwen_default/rollouts/sample_20261006T080922Z_woocommerce_stock_alert_s2l_sample_20261006T080922Z_H0_66f1634c52e1/eval_results.yaml",
+  "eval_result": {
+    "workspace_dir": "results/woocommerce_stock_alert_s2l/qwen_default/rollouts/sample_20261006T080922Z_woocommerce_stock_alert_s2l_sample_20261006T080922Z_H0_66f1634c52e1/example0_rollout0",
+    "score": 1.0,
+    "feedback": "Correct: Google Sheet and stock-alert emails match the benchmark checks."
+  },
+  "score": 1.0,
+  "success_threshold": 1.0,
+  "resolved": true,
+  "evaluator_status": "scored",
+  "trace_error": null
+}

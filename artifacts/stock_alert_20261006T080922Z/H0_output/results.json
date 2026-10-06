@@ -1,0 +1,37 @@
+{
+  "schema_version": "harnessfix.eval_results.v1",
+  "mode": "openhands",
+  "task_id": "woocommerce_stock_alert_s2l",
+  "success_threshold": 1.0,
+  "source_eval_results": "/root/slm-harness-adaptation-reproduce/results/woocommerce_stock_alert_s2l/qwen_default/rollouts/sample_20261006T080922Z_woocommerce_stock_alert_s2l_sample_20261006T080922Z_H0_66f1634c52e1/eval_results.yaml",
+  "all_ids": [
+    "woocommerce_stock_alert_s2l__example0__rollout0"
+  ],
+  "resolved_ids": [
+    "woocommerce_stock_alert_s2l__example0__rollout0"
+  ],
+  "unresolved_ids": [],
+  "empty_patch_ids": [],
+  "error_ids": [],
+  "unsupported_ids": [],
+  "score_mean": 1.0,
+  "rollout_groups": {
+    "woocommerce_stock_alert_s2l__example0": [
+      "woocommerce_stock_alert_s2l__example0__rollout0"
+    ]
+  },
+  "records": {
+    "woocommerce_stock_alert_s2l__example0__rollout0": {
+      "instance_id": "woocommerce_stock_alert_s2l__example0__rollout0",
+      "task_instance_id": "woocommerce_stock_alert_s2l__example0",
+      "example_index": 0,
+      "rollout_id": 0,
+      "score": 1.0,
+      "resolved": true,
+      "evaluator_status": "scored",
+      "feedback": "Correct: Google Sheet and stock-alert emails match the benchmark checks.",
+      "workspace_dir": "/root/slm-harness-adaptation-reproduce/results/woocommerce_stock_alert_s2l/qwen_default/rollouts/sample_20261006T080922Z_woocommerce_stock_alert_s2l_sample_20261006T080922Z_H0_66f1634c52e1/example0_rollout0",
+      "manifest_path": "/root/HarnessFix-reproduce/artifacts/stock_alert_20261006T080922Z/H0_output/traces/woocommerce_stock_alert_s2l__example0__rollout0/manifest.json"
+    }
+  }
+}

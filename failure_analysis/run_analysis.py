@@ -1238,7 +1238,7 @@ def _terminal_bench_run_analysis(
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 
-# ── Better Harness / OpenHands SDK mode ─────────────────────────────────────
+# ── OpenHands SDK mode ──────────────────────────────────────────────────────
 
 def _openhands_get_paths(instance_id: str) -> dict[str, str]:
     manifest_path = _traces_dir() / instance_id / "manifest.json"
@@ -1329,7 +1329,9 @@ def _openhands_run_analysis(
         observation_template=model_config.get("observation_template", ""),
         format_error_template=model_config.get("format_error_template", ""),
         action_regex=model_config.get("action_regex", ""),
-        model_kwargs=model_config.get("model_kwargs", {}) | selected_model_kwargs(),
+        model_kwargs=model_config.get("model_kwargs", {}) | (
+            selected_model_kwargs() if os.environ.get("HARNESSFIX_MODEL_ALIAS") else {}
+        ),
         cost_tracking="ignore_errors",
     )
     agent = DefaultAgent(model, _make_analysis_environment(env_config), **agent_config)
@@ -1348,24 +1350,33 @@ def _openhands_run_analysis(
         )
     except Exception as exc:
         logger.error(f"Agent raised exception for {instance_id}: {exc}")
-        return None
-
-    parsed = parse_submission(result.get("submission", ""))
-    if parsed is None:
-        fallback = _fallback_analysis_output(
+        parsed = _fallback_analysis_output(
             instance_id=instance_id,
             failure_category=failure_category,
-            exit_status=result.get("exit_status", "analysis_failed"),
-            api_calls=agent.n_calls,
-            reason="OpenHands analysis agent did not return valid JSON",
+            exit_status="analysis_agent_exception",
+            api_calls=getattr(agent, "n_calls", 0),
+            reason=str(exc),
             evidence_anchor=evidence_anchor,
             htir_bundle=htir_bundle,
             htir_path=htir_path,
         )
-        manifest = _openhands_manifest(paths)
-        fallback.setdefault("task_instance_id", manifest.get("task_instance_id"))
-        fallback.setdefault("rollout_id", manifest.get("rollout_id"))
-        return fallback
+    else:
+        submission = result.get("submission", "") or ""
+        logger.info(f"Submission for {instance_id}: {submission!r}")
+        parsed = parse_submission(submission)
+        if parsed is None:
+            logger.warning(f"Could not parse JSON from submission for {instance_id}")
+            parsed = _fallback_analysis_output(
+                instance_id=instance_id,
+                failure_category=failure_category,
+                exit_status=result.get("exit_status", "analysis_parse_error"),
+                api_calls=agent.n_calls,
+                reason=f"invalid JSON submission: {submission[:1000]}",
+                evidence_anchor=evidence_anchor,
+                htir_bundle=htir_bundle,
+                htir_path=htir_path,
+            )
+            parsed["_parse_error"] = True
     parsed.setdefault("instance_id", instance_id)
     parsed.setdefault("failure_category", failure_category)
     manifest = _openhands_manifest(paths)
@@ -1479,7 +1490,7 @@ def main():
         mode_label = "Terminal-Bench"
     elif is_openhands:
         _run_one = _openhands_run_analysis
-        mode_label = "Better Harness / OpenHands"
+        mode_label = "OpenHands SDK"
     else:
         _run_one = run_analysis
         mode_label = "SWE-bench"
