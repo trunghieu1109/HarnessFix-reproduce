@@ -98,6 +98,20 @@ class OpenHandsModelConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.bridge.load_model("qwen")
 
+    def test_qwen_thinking_switch_reaches_analysis_and_repair(self) -> None:
+        path = self.root / "configs/models.yaml"
+        models = yaml.safe_load(path.read_text())
+        extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+        models["models"][1].update(reasoning_effort=None, extra_body=extra_body)
+        path.write_text(yaml.safe_dump(models))
+        with patch.dict(os.environ, {
+            "BETTER_HARNESS_ROOT": str(self.root), "HARNESSFIX_MODEL_ALIAS": "qwen",
+        }), patch.object(self.bridge.litellm, "register_model"):
+            kwargs = self.bridge.selected_model_kwargs()
+        self.assertIsNone(kwargs["reasoning_effort"])
+        self.assertEqual(kwargs["extra_body"], extra_body)
+        self.assertEqual(kwargs["temperature"], 0.6)
+
 
 if __name__ == "__main__":
     unittest.main()

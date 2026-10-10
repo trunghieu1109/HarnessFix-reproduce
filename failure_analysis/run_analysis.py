@@ -28,7 +28,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from dotenv import load_dotenv
+_openhands_better_root = os.environ.get("BETTER_HARNESS_ROOT") if os.environ.get("HARNESSFIX_MODEL_ALIAS") else None
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
+if _openhands_better_root:
+    os.environ["BETTER_HARNESS_ROOT"] = _openhands_better_root
 
 # ── project-root relative imports ──────────────────────────────────────────────
 REPO_ROOT = Path(__file__).parent.parent
@@ -43,7 +46,11 @@ from failure_analysis.htir import (
     compile_terminal_bench_htir,
     write_bundle,
 )
-from failure_analysis.artifact_sanitizer import sanitized_trace_output_path, write_sanitized_artifact
+from failure_analysis.artifact_sanitizer import sanitize_for_prompt, sanitized_trace_output_path, write_sanitized_artifact
+from failure_analysis.openhands_trace import load_openhands_trace, openhands_model_calls
+from failure_analysis.analysis_records import analysis_record_succeeded
+from failure_analysis.prompt_safety import PromptSafeAgent, PromptSafeLocalEnvironment
+from failure_analysis.secret_redaction import redact_secrets
 from failure_analysis.operator_registry import (
     infer_defect_class,
     infer_severity,
@@ -54,7 +61,8 @@ from failure_analysis.operator_registry import (
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel
-from task_agent.openhands_agent.model_config_bridge import selected_model_kwargs
+from task_agent.openhands_agent.model_config_bridge import configured_connection_kwargs, selected_model_kwargs
+from task_agent.openhands_agent.repair_references import technical_reference_prompt
 
 import yaml
 
@@ -195,7 +203,7 @@ def _truncate_observation_output(output: str, max_chars: int) -> tuple[str, bool
     return output[:head_chars] + marker + output[-tail_chars:], True
 
 
-class TruncatingLocalEnvironment(LocalEnvironment):
+class TruncatingLocalEnvironment(PromptSafeLocalEnvironment):
     def __init__(self, *args, output_max_chars: int = DEFAULT_OBSERVATION_OUTPUT_MAX_CHARS, **kwargs):
         super().__init__(*args, **kwargs)
         self.output_max_chars = output_max_chars
@@ -426,8 +434,8 @@ def load_completed_ids() -> set[str]:
             continue
         try:
             record = json.loads(line)
-            iid = record.get("instance_id")
-            if iid:
+            iid = record.get("instance_id") if isinstance(record, dict) else None
+            if iid and analysis_record_succeeded(record):
                 completed.add(iid)
         except json.JSONDecodeError:
             pass
@@ -653,7 +661,7 @@ def run_analysis(
         observation_template=model_config.get("observation_template", ""),
         format_error_template=model_config.get("format_error_template", ""),
         action_regex=model_config.get("action_regex", ""),
-        model_kwargs=model_config.get("model_kwargs", {}),
+        model_kwargs=configured_connection_kwargs(model_name, model_config.get("model_kwargs", {})),
         cost_tracking="ignore_errors",
     )
     env = _make_analysis_environment(env_config)
@@ -708,6 +716,7 @@ def run_analysis(
 
     parsed.setdefault("instance_id", instance_id)
     parsed.setdefault("failure_category", failure_category)
+    parsed.setdefault("api_calls", agent.n_calls)
     return _enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path)
 
 
@@ -1255,7 +1264,7 @@ def _openhands_get_paths(instance_id: str) -> dict[str, str]:
         "result_path": str(manifest_path),
         "report_path": str(manifest_path),
         "test_output_path": str(manifest_path),
-        "output_path": RESULTS_DIR / f"{instance_id}.traj.json",
+        "output_path": RESULTS_DIR / "trajectories" / _all_results_path().stem / f"{instance_id}.traj.json",
     }
 
 
@@ -1311,7 +1320,17 @@ def _openhands_run_analysis(
     paths = _openhands_get_paths(instance_id)
     evidence_anchor = _openhands_evidence_anchor(paths)
     task_description = _openhands_task_description(paths)
-    sanitized_traj_path = write_sanitized_artifact(paths["traj_path"], _sanitized_traj_path(instance_id))
+    trace = load_openhands_trace(_openhands_manifest(paths), paths["traj_path"])
+    trace["model_calls"] = openhands_model_calls(trace)
+    # Keep event indices while removing duplicate raw JSON completion payloads.
+    trace["events"] = [
+        {key: value for key, value in event.items() if key != "log_data"}
+        if event.get("kind") == "LLMCompletionLogEvent" else event
+        for event in trace.get("events", [])
+    ]
+    sanitized_traj_path = _sanitized_traj_path(instance_id)
+    sanitized_traj_path.parent.mkdir(parents=True, exist_ok=True)
+    sanitized_traj_path.write_text(json.dumps(sanitize_for_prompt(trace), indent=2, ensure_ascii=False) + "\n")
     htir_bundle = compile_openhands_htir(
         instance_id=instance_id,
         failure_category=failure_category,
@@ -1334,7 +1353,7 @@ def _openhands_run_analysis(
         ),
         cost_tracking="ignore_errors",
     )
-    agent = DefaultAgent(model, _make_analysis_environment(env_config), **agent_config)
+    agent = PromptSafeAgent(model, _make_analysis_environment(env_config), **agent_config)
     logger.info(f"Running OpenHands analysis for {instance_id} ({failure_category})")
     try:
         result = agent.run(
@@ -1345,11 +1364,12 @@ def _openhands_run_analysis(
             manifest_path=paths["manifest_path"],
             htir_path=str(htir_path),
             impl_doc=impl_doc,
-            task_description=task_description,
+            task_description=redact_secrets(task_description),
+            technical_references=technical_reference_prompt(),
             **_agent_source_context("openhands"),
         )
     except Exception as exc:
-        logger.error(f"Agent raised exception for {instance_id}: {exc}")
+        logger.error(f"Agent raised exception for {instance_id}: {redact_secrets(str(exc))}")
         parsed = _fallback_analysis_output(
             instance_id=instance_id,
             failure_category=failure_category,
@@ -1382,7 +1402,8 @@ def _openhands_run_analysis(
     manifest = _openhands_manifest(paths)
     parsed.setdefault("task_instance_id", manifest.get("task_instance_id"))
     parsed.setdefault("rollout_id", manifest.get("rollout_id"))
-    return _enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path)
+    parsed.setdefault("api_calls", agent.n_calls)
+    return redact_secrets(_enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path))
 
 
 def main():
@@ -1406,6 +1427,8 @@ def main():
                         help="Re-analyze already-completed instances")
     parser.add_argument("--workers", "-w", type=int, default=1,
                         help="Number of parallel analysis workers (default: 1)")
+    parser.add_argument("--step-limit", type=int, default=None,
+                        help="Override the configured model-call limit per diagnosis")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print plan without running anything")
     parser.add_argument("--verbose", "-v", action="store_true",
@@ -1431,6 +1454,8 @@ def main():
     parser.add_argument("--agent-source-dir", type=Path, default=None,
                         help="Source directory for the task agent version that produced these traces")
     args = parser.parse_args()
+    if args.step_limit is not None and args.step_limit < 1:
+        parser.error("--step-limit must be a positive integer")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -1497,6 +1522,9 @@ def main():
 
     # Load config and impl doc
     config = load_config(args.mode)
+    if args.step_limit is not None:
+        config["step_limit"] = args.step_limit
+        config.setdefault("agent", {})["step_limit"] = args.step_limit
     source_context = _agent_source_context(args.mode)
     if is_gaia:
         impl_doc = f"(open_deep_research agent source for this run: {source_context['agent_source_dir']})"
@@ -1591,6 +1619,9 @@ def main():
             if result:
                 result = _attach_analysis_run_metadata(result, args.mode)
                 append_result(result)
+                if not analysis_record_succeeded(result):
+                    thread_logger.error(f"[{cat}] ✗ analysis failed; fallback evidence saved")
+                    return iid, False, result.get("api_calls", 0)
                 thread_logger.info(f"[{cat}] ✓ done")
                 return iid, True, result.get("api_calls", 0)
             else:
@@ -1619,6 +1650,9 @@ def main():
     print(f"Total API calls:  {total_api_calls}")
     print(f"Results: {_all_results_path()}")
     print(f"{'='*60}")
+
+    if fail_count:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -273,10 +273,10 @@ model:
 
     To submit, run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/result_INSTANCE_ID.json
   model_kwargs:
-    temperature: 0.0
+    temperature: 0.2
     stream: false
     timeout: 300
     max_retries: 0
     drop_params: true
-    api_base: "https://api.openai.com/v1"
-    # api_key is read from OPENAI_API_KEY environment variable (set in .env)
+    api_base: QWEN_BASE_URL
+    reasoning_effort: low

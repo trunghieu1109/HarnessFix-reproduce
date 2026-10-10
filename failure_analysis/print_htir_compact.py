@@ -10,8 +10,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from failure_analysis.secret_redaction import redact_secrets
 
 
 def _clip(value: Any, limit: int = 900) -> Any:
@@ -112,7 +119,7 @@ def main() -> None:
     args = parser.parse_args()
 
     bundle = json.loads(args.htir_path.read_text(errors="replace"))
-    compact = _clip(build_compact_bundle(bundle, args.step_limit))
+    compact = _clip(redact_secrets(build_compact_bundle(bundle, args.step_limit)))
     text = json.dumps(compact, ensure_ascii=False, indent=2)
     if args.char_limit > 0 and len(text) > args.char_limit:
         text = text[: args.char_limit - 80] + "\n... [compact HTIR output truncated]\n"

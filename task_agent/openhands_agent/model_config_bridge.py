@@ -1,11 +1,28 @@
 """Load OpenHands analysis models from Better Harness's model configuration."""
 
+import json
 import os
 from pathlib import Path
 
 import litellm
 import yaml
 from dotenv import dotenv_values
+
+MODEL_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "task_agent" / "model_registry.json"
+
+def configured_connection_kwargs(model_name: str, kwargs: dict) -> dict:
+    """Apply model-specific settings without replacing task environment globals."""
+    result = dict(kwargs)
+    path = MODEL_REGISTRY_PATH
+    root = path.parent.parent
+    entry = json.loads(path.read_text()).get(model_name, {}) if path.is_file() else {}
+    result.update(entry.get("model_kwargs_override") or {})
+    key_env = entry.get("api_key_env")
+    if key_env and not result.get("api_key"):
+        key = os.environ.get(key_env) or dotenv_values(root / ".env").get(key_env)
+        if key:
+            result["api_key"] = key
+    return result
 
 
 def load_model(alias: str) -> dict:
@@ -31,6 +48,8 @@ def load_model(alias: str) -> dict:
     }
     if "temperature" in model:
         resolved["temperature"] = float(resolve(model["temperature"]))
+    if "extra_body" in model:
+        resolved["extra_body"] = model["extra_body"]
     provider = litellm.get_llm_provider(resolved["model"])[1]
     litellm.register_model({
         resolved["model"]: {
@@ -54,4 +73,6 @@ def selected_model_kwargs() -> dict:
     }
     if "temperature" in model:
         kwargs["temperature"] = model["temperature"]
+    if "extra_body" in model:
+        kwargs["extra_body"] = model["extra_body"]
     return kwargs

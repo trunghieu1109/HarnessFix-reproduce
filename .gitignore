@@ -24,6 +24,7 @@ eval/e2e_smoke*/
 failure_analysis/results/
 failure_analysis/memory/
 improvement_plans/
+artifacts/openhands/
 
 data/*/
 data/*.jsonl
@@ -38,3 +39,5 @@ downloads_folder/
 *.log
 *.tmp
 .DS_Store
+
+artifacts

@@ -22,6 +22,7 @@ from failure_analysis.openhands_io import normalize_rollout
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_ROOT = Path(__file__).resolve().parent / "original"
+RUNTIME_LOGGING_SOURCE = Path(__file__).resolve().parent / "runtime_logging.py"
 SUPPORTED_TASKS = {
     "woocommerce_stock_alert_s2l",
     "machine_operating_s2l",
@@ -58,6 +59,7 @@ def pack_candidate(candidate_dir: Path, output_path: Path) -> Path:
     if not (candidate_dir / "agent.py").is_file():
         raise FileNotFoundError(candidate_dir / "agent.py")
     payload = _bundle_payload(candidate_dir)
+    runtime_logging_source = RUNTIME_LOGGING_SOURCE.read_text(encoding="utf-8")
     launcher = f'''from __future__ import annotations
 
 import atexit
@@ -82,7 +84,22 @@ if _SPEC is None or _SPEC.loader is None:
 _MODULE = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
-build_agent = _MODULE.build_agent
+_RUNTIME_LOGGING = {{}}
+exec(compile({runtime_logging_source!r}, "harnessfix_runtime_logging.py", "exec"), _RUNTIME_LOGGING)
+_RUNTIME_LOGGING["install_sdk_logging_fix"]()
+_RUNTIME_LOGGING["install_sdk_generation_config_fix"]()
+def build_agent(base_dir, llm):
+    if llm is not None:
+        # Rebuild the SDK LLM so its telemetry is initialized with logging on.
+        # RemoteConversation streams these logs back to this host-side folder.
+        settings = {{name: getattr(llm, name) for name in type(llm).model_fields}}
+        workspace = Path(base_dir)
+        settings.update(
+            log_completions=True,
+            log_completions_folder=str(workspace.parent / (workspace.name + "_logs") / "llm_completions"),
+        )
+        llm = type(llm)(**settings)
+    return _MODULE.build_agent(base_dir=base_dir, llm=llm)
 if hasattr(_MODULE, "get_workspace_scripts"):
     get_workspace_scripts = _MODULE.get_workspace_scripts
 if hasattr(_MODULE, "get_hook_config"):
@@ -152,6 +169,7 @@ def run_better_harness(
     normalized_output: Path,
     success_threshold: float,
     dry_run: bool = False,
+    example_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     better_root = better_root.resolve()
     candidate_dir = candidate_dir.resolve()
@@ -203,6 +221,7 @@ def run_better_harness(
         output_dir=normalized_output,
         task_id=task_id,
         success_threshold=success_threshold,
+        example_ids=example_ids,
     )
     return {
         "generated_config": str(generated_path),

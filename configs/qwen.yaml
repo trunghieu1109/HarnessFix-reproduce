@@ -1,0 +1,16 @@
+# Qwen served through vLLM or another OpenAI-compatible server.
+# openai/ selects the API protocol; the model is still Qwen.
+name: qwen-vllm
+model: openai/Qwen/Qwen3.5-9B
+api_base: QWEN_BASE_URL
+api_key_env: QWEN_API_KEY
+
+# Client token budgets; the server must support the configured context.
+max_input_tokens: 120000
+max_output_tokens: 8192
+temperature: 0.2
+# vLLM controls thinking through the chat template, rather than reasoning_effort.
+reasoning_effort: null
+extra_body:
+  chat_template_kwargs:
+    enable_thinking: false

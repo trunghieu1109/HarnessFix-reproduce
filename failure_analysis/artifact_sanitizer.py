@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from failure_analysis.secret_redaction import redact_secrets
+
 
 RAW_PROVIDER_RESPONSE_KEYS = {
     "raw_response",
@@ -69,7 +71,7 @@ def _drop_key(key: str, value: Any, parent: dict[str, Any], path: tuple[str, ...
     return False
 
 
-def sanitize_for_prompt(value: Any, path: tuple[str, ...] = ()) -> Any:
+def _sanitize_metadata(value: Any, path: tuple[str, ...] = ()) -> Any:
     """Remove provider/runtime metadata while preserving semantic trace content.
 
     The sanitized artifact is what analysis agents should inspect. It keeps user
@@ -81,7 +83,7 @@ def sanitize_for_prompt(value: Any, path: tuple[str, ...] = ()) -> Any:
         for key, item in value.items():
             if _drop_key(key, item, value, path):
                 continue
-            cleaned = sanitize_for_prompt(item, path + (key,))
+            cleaned = _sanitize_metadata(item, path + (key,))
             if cleaned in (None, {}, []):
                 continue
             sanitized[key] = cleaned
@@ -90,9 +92,13 @@ def sanitize_for_prompt(value: Any, path: tuple[str, ...] = ()) -> Any:
         return [
             cleaned
             for item in value
-            if (cleaned := sanitize_for_prompt(item, path)) not in (None, {}, [])
+            if (cleaned := _sanitize_metadata(item, path)) not in (None, {}, [])
         ]
     return value
+
+
+def sanitize_for_prompt(value: Any, path: tuple[str, ...] = ()) -> Any:
+    return _sanitize_metadata(redact_secrets(value), path)
 
 
 def sanitized_trace_output_path(results_dir: Path, run_label: str, instance_id: str) -> Path:

@@ -3,8 +3,8 @@
     "max_tokens": 8192,
     "max_input_tokens": 131072,
     "max_output_tokens": 8192,
-    "input_cost_per_token": 0.0000001,
-    "output_cost_per_token": 0.0000004,
+    "input_cost_per_token": 1e-07,
+    "output_cost_per_token": 4e-07,
     "litellm_provider": "openai",
     "mode": "chat",
     "api_base": "https://api.openai.com/v1",
@@ -23,8 +23,8 @@
     "max_tokens": 8192,
     "max_input_tokens": 131072,
     "max_output_tokens": 8192,
-    "input_cost_per_token": 0.0000004,
-    "output_cost_per_token": 0.0000016,
+    "input_cost_per_token": 4e-07,
+    "output_cost_per_token": 1.6e-06,
     "litellm_provider": "openai",
     "mode": "chat",
     "api_base": "https://api.openai.com/v1",
@@ -55,5 +55,78 @@
       "drop_params": true
     },
     "cost_tracking": "ignore_errors"
+  },
+  "openai/Qwen/Qwen3.5-9B": {
+    "max_tokens": 128192,
+    "max_input_tokens": 120000,
+    "max_output_tokens": 8192,
+    "litellm_provider": "openai",
+    "mode": "chat",
+    "api_base": "QWEN_BASE_URL",
+    "api_key_env": "QWEN_API_KEY",
+    "config_name": "swebench_xml.yaml",
+    "model_class": "litellm_textbased",
+    "model_kwargs_override": {
+      "temperature": 0.2,
+      "max_tokens": 8192,
+      "stream": false,
+      "timeout": 300,
+      "max_retries": 0,
+      "drop_params": true,
+      "api_base": "QWEN_BASE_URL",
+      "extra_body": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    },
+    "cost_tracking": "ignore_errors",
+    "input_cost_per_token": 0.0,
+    "output_cost_per_token": 0.0
+  },
+  "gemini/ag/gemini-3.1-pro-low": {
+    "max_tokens": 258192,
+    "max_input_tokens": 250000,
+    "max_output_tokens": 8192,
+    "litellm_provider": "gemini",
+    "mode": "chat",
+    "api_base": null,
+    "api_key_env": "GEMINI_API_KEY",
+    "config_name": "swebench_xml.yaml",
+    "model_class": "litellm_textbased",
+    "model_kwargs_override": {
+      "temperature": 0.2,
+      "max_tokens": 8192,
+      "stream": false,
+      "timeout": 300,
+      "max_retries": 0,
+      "drop_params": true,
+      "api_base": null
+    },
+    "cost_tracking": "ignore_errors"
+  },
+  "openai/ag/gemini-3.1-pro-low": {
+    "max_tokens": 258192,
+    "max_input_tokens": 250000,
+    "max_output_tokens": 8192,
+    "litellm_provider": "openai",
+    "mode": "chat",
+    "api_base": "GEMINI_BASE_URL",
+    "api_key_env": "GEMINI_API_KEY",
+    "config_name": "swebench_xml.yaml",
+    "model_class": "litellm_textbased",
+    "model_kwargs_override": {
+      "temperature": 0.2,
+      "max_tokens": 8192,
+      "stream": false,
+      "timeout": 300,
+      "max_retries": 0,
+      "drop_params": true,
+      "api_base": "GEMINI_BASE_URL",
+      "reasoning_effort": "low"
+    },
+    "cost_tracking": "ignore_errors",
+    "input_cost_per_token": 0.0,
+    "output_cost_per_token": 0.0
   }
 }

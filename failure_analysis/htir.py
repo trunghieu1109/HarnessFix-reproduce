@@ -6,6 +6,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+from failure_analysis.openhands_trace import (
+    event_response_key,
+    load_openhands_trace,
+    openhands_api_call_count,
+    openhands_model_calls,
+)
 
 NODE_TYPES = (
     "TaskSpecRecord",
@@ -1780,7 +1786,7 @@ def _openhands_message_text(event: dict[str, Any]) -> str:
 
 def _openhands_action_summary(event: dict[str, Any]) -> str:
     thought = _openhands_event_text(event.get("thought") or "")
-    action = event.get("action") or {}
+    action = event.get("action") or event.get("tool_call") or {}
     action_text = _json_compact(action, 900)
     return _clean_text(" | ".join(part for part in (thought, action_text) if part), 1200)
 
@@ -1812,17 +1818,83 @@ def _append_openhands_event_stream(
     parent_id: str,
     source_prefix: str,
     step_offset: int = 0,
+    model_calls: list[dict[str, Any]] | None = None,
 ) -> tuple[str, list[str], int]:
     last_id = parent_id
     commands: list[str] = []
     tool_calls: dict[str, str] = {}
+    parsers: dict[str, str] = {}
     step_id = step_offset
+    calls = model_calls if model_calls is not None else openhands_model_calls({"events": stream})
+    calls_by_id = {str(call["response_id"]): call for call in calls}
+    model_nodes: dict[str, str] = {}
+    call_positions = {str(call["response_id"]): index for index, call in enumerate(calls)}
+    pending_call = 0
+
+    def append_model(call: dict[str, Any], source_ref: str) -> str:
+        nonlocal last_id, step_id
+        key = str(call["response_id"])
+        if key in model_nodes:
+            return model_nodes[key]
+        step_id += 1
+        recorded_source = call.get("source_ref") or source_ref
+        if recorded_source.startswith("trace.events["):
+            recorded_source = source_prefix + recorded_source[len("trace.events"):]
+        request = call.get("request_payload") or call.get("request_messages") or []
+        request_messages = call.get("request_messages") or []
+        response = call.get("response_message") or {}
+        response_summary = _json_compact(response, 1200) if not call.get("error") else f"LLM request failed: {_json_compact(call['error'], 1000)}"
+        model_id = f"evt_{len(nodes):03d}"
+        nodes.append(_event(
+            model_id, "ModelInvocationEvent", step_id, "controller", response_summary,
+            recorded_source,
+            {
+                "response_id": key,
+                "model": call.get("model"),
+                "request_message_count": len(request_messages),
+                "_request_context_text": _flatten_text(request),
+                "request_summary": _swe_request_summary(request_messages) if request_messages else (_json_compact(request, 1200) if request else ""),
+                "response_summary": response_summary,
+                "response_message": response,
+                "original_response_message": call.get("original_response_message"),
+                "generation_settings": call.get("generation_settings"),
+                "usage": call.get("usage") or {},
+                "error": call.get("error"),
+                "timestamp": call.get("timestamp"),
+                "request_evidence": call.get("request_evidence", "not_recorded"),
+                "response_evidence": call.get("response_evidence", "trace_events"),
+            },
+        ))
+        _add_edge(edges, last_id, model_id, "temporal")
+        last_id = model_id
+        model_nodes[key] = model_id
+        if call.get("error"):
+            error_id = f"evt_{len(nodes):03d}"
+            nodes.append(_event(error_id, "ExceptionEvent", step_id, "controller", response_summary,
+                                recorded_source, {"error": call["error"]}))
+            _add_edge(edges, model_id, error_id, "causal")
+            last_id = error_id
+        return model_id
+
     for index, event in enumerate(stream):
         if not isinstance(event, dict):
             continue
         step_id += 1
         kind = str(event.get("kind") or event.get("type") or "UnknownEvent")
         source_ref = f"{source_prefix}[{index}]"
+        if kind in {"ConversationStateUpdateEvent", "LLMCompletionLogEvent"}:
+            # State bookkeeping and completion payloads are read by the loader.
+            continue
+
+        model_id = None
+        if kind == "ActionEvent" or (kind == "MessageEvent" and event.get("source") == "agent"):
+            key = event_response_key(event, index)
+            position = call_positions[key]
+            # Include auxiliary completion records that have no event of their own.
+            while pending_call <= position:
+                append_model(calls[pending_call], source_ref)
+                pending_call += 1
+            model_id = append_model(calls_by_id[key], source_ref)
 
         if kind == "SystemPromptEvent":
             summary = _openhands_event_text(event.get("system_prompt") or event)
@@ -1833,6 +1905,8 @@ def _append_openhands_event_stream(
             continue
 
         if kind == "MessageEvent":
+            if event.get("source") == "agent":
+                continue
             summary = _openhands_message_text(event)
             node_id = f"evt_{len(nodes):03d}"
             nodes.append(
@@ -1852,33 +1926,23 @@ def _append_openhands_event_stream(
 
         if kind == "ActionEvent":
             summary = _openhands_action_summary(event)
-            model_id = f"evt_{len(nodes):03d}"
-            nodes.append(
-                _event(
-                    model_id,
-                    "ModelInvocationEvent",
-                    step_id,
-                    "controller",
-                    summary,
-                    source_ref,
-                    {
-                        "source": event.get("source"),
-                        "thought": event.get("thought"),
-                        "action": event.get("action"),
-                        "tool_name": event.get("tool_name"),
-                        "tool_call_id": event.get("tool_call_id"),
-                    },
-                )
-            )
-            _add_edge(edges, last_id, model_id, "temporal")
+            parsed = bool(event.get("action"))
             parser_id = _append_parser_node(
                 nodes,
                 edges,
                 model_id,
                 step_id,
-                f"Parsed OpenHands action kind={(event.get('action') or {}).get('kind', 'unknown')}",
+                f"Parsed OpenHands action kind={(event.get('action') or {}).get('kind', 'unknown')}" if parsed else "OpenHands tool call did not produce a valid parsed action.",
                 f"{source_ref}.action",
+                {"parsed": parsed, "tool_call": event.get("tool_call")},
             )
+            call_id = event.get("tool_call_id") or (event.get("tool_call") or {}).get("id")
+            if call_id:
+                parsers[str(call_id)] = parser_id
+            commands.append(summary)
+            if not parsed:
+                last_id = parser_id
+                continue
             component = _openhands_component(event, summary)
             action_kind = str((event.get("action") or {}).get("kind") or "")
             if component == "submitter":
@@ -1900,6 +1964,7 @@ def _append_openhands_event_stream(
                         "action": event.get("action"),
                         "tool_name": event.get("tool_name"),
                         "tool_call_id": event.get("tool_call_id"),
+                        "tool_call": event.get("tool_call"),
                     },
                 )
             )
@@ -1908,7 +1973,6 @@ def _append_openhands_event_stream(
             call_id = event.get("tool_call_id") or (event.get("action") or {}).get("tool_call_id")
             if call_id:
                 tool_calls[str(call_id)] = action_id
-            commands.append(summary or action_kind)
             last_id = action_id
             continue
 
@@ -1959,9 +2023,15 @@ def _append_openhands_event_stream(
         else:
             node_type, component = "OrchestrationEvent", "orchestrator"
         node_id = f"evt_{len(nodes):03d}"
-        nodes.append(_event(node_id, node_type, step_id, component, _json_compact(event, 1200), source_ref))
+        nodes.append(_event(node_id, node_type, step_id, component, _json_compact(event, 1200), source_ref,
+                            {"error": event.get("error"), "tool_call_id": event.get("tool_call_id")}))
         _add_edge(edges, last_id, node_id, "temporal")
+        if kind == "AgentErrorEvent" and str(event.get("tool_call_id")) in parsers:
+            _add_edge(edges, parsers[str(event["tool_call_id"])], node_id, "causal")
         last_id = node_id
+    for call in calls[pending_call:]:
+        step_id += 1
+        append_model(call, "trace.model_calls")
     return last_id, commands, step_id
 
 
@@ -1973,18 +2043,13 @@ def compile_openhands_htir(
 ) -> dict[str, Any]:
     """Compile an OpenHands SDK trace without inventing state evidence."""
     manifest = _read_json(paths["manifest_path"])
-    trace_path = next(
-        (
-            path for path in (manifest.get("trace_path"), paths.get("traj_path"), manifest.get("raw_trace_path"))
-            if path and Path(path).is_file()
-        ),
-        None,
-    )
-    if not trace_path:
-        raise FileNotFoundError(f"No OpenHands trace for {instance_id}")
-    loaded_trace = _read_json(trace_path)
-    trace = loaded_trace if isinstance(loaded_trace, dict) else {"events": loaded_trace}
+    trace = load_openhands_trace(manifest, paths.get("traj_path"))
     stream = trace.get("events", [])
+    calls = openhands_model_calls(trace)
+    subagent_response_ids = {
+        str(event["llm_response_id"]) for payload in (trace.get("subagents") or {}).values()
+        for event in payload.get("events", []) if event.get("llm_response_id")
+    }
     eval_result = manifest.get("eval_result") or {}
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
@@ -2018,6 +2083,7 @@ def compile_openhands_htir(
         stream,
         parent_id="evt_000",
         source_prefix="trace.events",
+        model_calls=[call for call in calls if str(call["response_id"]) not in subagent_response_ids],
     )
 
     for agent_id, payload in (trace.get("subagents") or {}).items():
@@ -2041,6 +2107,11 @@ def compile_openhands_htir(
             parent_id=orchestration_id,
             source_prefix=f"trace.subagents[{agent_id!r}].events",
             step_offset=last_step + 1,
+            model_calls=openhands_model_calls(payload | {"model_calls": [
+                call for call in calls if str(call["response_id"]) in {
+                    str(event["llm_response_id"]) for event in payload.get("events", []) if event.get("llm_response_id")
+                }
+            ]}),
         )
         last_id = sub_last
         commands.extend(sub_commands)
@@ -2091,6 +2162,7 @@ def compile_openhands_htir(
     )
 
     metrics = trace.get("metrics") or {}
+    model_nodes = [node for node in nodes if node["type"] == "ModelInvocationEvent"]
     stats = {
         "exit_status": "error" if trace.get("error") else ("resolved" if manifest.get("resolved") else "unresolved"),
         "score": eval_result.get("score"),
@@ -2099,6 +2171,10 @@ def compile_openhands_htir(
         "subagent_count": len(trace.get("subagents") or {}),
         "metrics": metrics,
         "instance_cost": metrics.get("accumulated_cost"),
+        "api_calls": openhands_api_call_count(trace),
+        "model_call_count": len(model_nodes),
+        "recorded_request_count": sum(node["attributes"].get("request_evidence") == "sdk_completion_log" for node in model_nodes),
+        "missing_model_call_records": max(0, openhands_api_call_count(trace) - len(model_nodes)),
         **_repetition_stats(commands),
     }
     views = _build_views(nodes, edges, evaluator_anchors)

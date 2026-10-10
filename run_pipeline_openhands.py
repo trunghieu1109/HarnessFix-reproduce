@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Stage-oriented HarnessFix prototype for Better Harness/OpenHands candidates.
-
-This driver keeps the existing HarnessFix stages explicit.  It does not add a
-new task-state observer or candidate acceptance gate.
-"""
+"""HarnessFix OpenHands closed loop and individual analysis/repair stages."""
 
 from __future__ import annotations
 
@@ -18,6 +14,9 @@ from pathlib import Path
 import yaml
 
 from task_agent.openhands_agent.model_config_bridge import load_model, selected_model_kwargs
+from task_agent.openhands_agent.repair_references import (
+    REFERENCE_DEFAULTS, REFERENCE_ENV, stage_references, technical_reference_prompt, validate_references,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -38,6 +37,7 @@ def _modify_candidate(
     spec_path: Path,
     model_name: str,
     redo_feedback: Path | None,
+    trajectory_output: Path | None = None,
 ) -> None:
     base_dir = base_dir.resolve()
     target_dir = target_dir.resolve()
@@ -47,9 +47,8 @@ def _modify_candidate(
     config = yaml.safe_load(MODIFY_CONFIG.read_text(encoding="utf-8"))
 
     sys.path.insert(0, str(REPO_ROOT / "task_agent" / "mini-swe-agent" / "src"))
-    from minisweagent.agents.default import DefaultAgent
-    from minisweagent.environments.local import LocalEnvironment
     from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel
+    from failure_analysis.prompt_safety import PromptSafeAgent, PromptSafeLocalEnvironment
 
     agent_config = dict(config.get("agent", {}))
     for key in ("step_limit", "cost_limit"):
@@ -67,7 +66,7 @@ def _modify_candidate(
     )
     result_dir = REPO_ROOT / "enhancement_implementation" / "results"
     result_dir.mkdir(parents=True, exist_ok=True)
-    output_path = result_dir / f"modify_openhands_{target_dir.name}.traj.json"
+    output_path = trajectory_output or result_dir / f"modify_openhands_{target_dir.name}.traj.json"
     env_vars = {
         **environment_config.get("env", {}),
         "TARGET_DIR": str(target_dir),
@@ -76,9 +75,9 @@ def _modify_candidate(
         "PLAN_JSON_PATH": str(spec_path.resolve()),
         "REDO_FEEDBACK_PATH": str(redo_feedback.resolve()) if redo_feedback else "",
     }
-    agent = DefaultAgent(
+    agent = PromptSafeAgent(
         model,
-        LocalEnvironment(env=env_vars),
+        PromptSafeLocalEnvironment(env=env_vars, observation_max_chars=environment_config.get("observation_max_chars", 16000)),
         output_path=output_path,
         **agent_config,
     )
@@ -87,13 +86,22 @@ def _modify_candidate(
         original_dir=str(base_dir),
         plan_path=str(plan_path.resolve()),
         plan_json_path=str(spec_path.resolve()),
+        technical_references=technical_reference_prompt(),
     )
     print(json.dumps({"exit_status": result.get("exit_status"), "trajectory": str(output_path)}, indent=2))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="HarnessFix stages for Better Harness/OpenHands")
+    parser = argparse.ArgumentParser(description="HarnessFix closed loop and stages for Better Harness/OpenHands")
     subparsers = parser.add_subparsers(dest="stage", required=True)
+
+    run = subparsers.add_parser("run", help="Run the closed loop from one experiment YAML; resume with --run-dir")
+    run.add_argument("--config", type=Path, required=True)
+    run.add_argument("--run-dir", type=Path)
+    run.add_argument("--dry-run", action="store_true")
+
+    test = subparsers.add_parser("test", help="Evaluate the selected candidate after a completed repair loop")
+    test.add_argument("--run-dir", type=Path, required=True)
 
     analyze = subparsers.add_parser("analyze")
     analyze.add_argument("--traces-dir", type=Path, required=True)
@@ -103,6 +111,8 @@ def main() -> None:
     analyze.add_argument("--model", required=True)
     analyze.add_argument("--better-root", type=Path, required=True)
     analyze.add_argument("--workers", type=int, default=1)
+    analyze.add_argument("--step-limit", type=int, help="Override model-call limit per diagnosis")
+    analyze.add_argument("--instance-ids-file", type=Path)
 
     aggregate = subparsers.add_parser("aggregate")
     aggregate.add_argument("--results-file", type=Path, required=True)
@@ -114,6 +124,7 @@ def main() -> None:
     aggregate.add_argument("--prev-plan", type=Path)
     aggregate.add_argument("--prev-iteration-report", type=Path)
     aggregate.add_argument("--force", action="store_true")
+    aggregate.add_argument("--memory-root", type=Path)
 
     modify = subparsers.add_parser("modify")
     modify.add_argument("--base-dir", type=Path, required=True)
@@ -123,6 +134,11 @@ def main() -> None:
     modify.add_argument("--model", required=True)
     modify.add_argument("--better-root", type=Path, required=True)
     modify.add_argument("--redo-feedback", type=Path)
+    modify.add_argument("--trajectory-output", type=Path)
+
+    for stage_parser in (analyze, aggregate, modify):
+        stage_parser.add_argument("--reference-dir", type=Path, help="Use a verified SDK/trace reference snapshot")
+        stage_parser.add_argument("--no-technical-references", action="store_true", help="Disable supplemental SDK/trace documentation")
 
     audit = subparsers.add_parser("audit")
     audit.add_argument("--base-dir", type=Path, required=True)
@@ -140,12 +156,31 @@ def main() -> None:
     gate.add_argument("--output", type=Path, required=True)
 
     args = parser.parse_args()
+    if args.stage in {"run", "test"}:
+        from task_agent.openhands_agent.pipeline import run_from_config, test_selected
+
+        if args.stage == "run":
+            run_from_config(args.config, run_dir=args.run_dir, dry_run=args.dry_run)
+        else:
+            test_selected(args.run_dir.resolve())
+        return
     if args.stage in {"analyze", "aggregate", "modify"}:
         os.environ["BETTER_HARNESS_ROOT"] = str(args.better_root.resolve())
+        if args.reference_dir:
+            if args.no_technical_references:
+                parser.error("--reference-dir cannot be combined with --no-technical-references; use the snapshot's options")
+            reference_dir = args.reference_dir.resolve()
+            validate_references(reference_dir)
+        else:
+            options = dict.fromkeys(REFERENCE_DEFAULTS, False) if args.no_technical_references else REFERENCE_DEFAULTS
+            destination = {"analyze": "output_file", "aggregate": "output", "modify": "target_dir"}[args.stage]
+            output = getattr(args, destination).resolve()
+            reference_dir = stage_references(args.better_root.resolve(), output.parent / f"{output.name}.repair_references", options)
+        os.environ[REFERENCE_ENV] = str(reference_dir)
         os.environ["HARNESSFIX_MODEL_ALIAS"] = args.model
         args.model = load_model(args.model)["model"]
     if args.stage == "analyze":
-        _run([
+        command = [
             sys.executable,
             str(FAILURE_ANALYSIS_DIR / "run_analysis.py"),
             "--mode", "openhands",
@@ -155,7 +190,12 @@ def main() -> None:
             "--output-file", str(args.output_file),
             "--model", args.model,
             "--workers", str(args.workers),
-        ])
+        ]
+        if args.instance_ids_file:
+            command.extend(["--instance-ids-file", str(args.instance_ids_file)])
+        if args.step_limit is not None:
+            command.extend(["--step-limit", str(args.step_limit)])
+        _run(command)
     elif args.stage == "aggregate":
         command = [
             sys.executable,
@@ -174,6 +214,8 @@ def main() -> None:
             command.extend(["--prev-plan", str(args.prev_plan)])
         if args.prev_iteration_report:
             command.extend(["--prev-iteration-report", str(args.prev_iteration_report)])
+        if args.memory_root:
+            command.extend(["--memory-root", str(args.memory_root)])
         _run(command)
     elif args.stage == "modify":
         _modify_candidate(
@@ -183,6 +225,7 @@ def main() -> None:
             spec_path=args.spec,
             model_name=args.model,
             redo_feedback=args.redo_feedback,
+            trajectory_output=args.trajectory_output,
         )
     elif args.stage == "audit":
         _run([

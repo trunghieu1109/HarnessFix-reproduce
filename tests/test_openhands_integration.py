@@ -234,6 +234,69 @@ class OpenHandsAnalysisTests(unittest.TestCase):
 
         cls.runner = run_analysis
 
+    def test_missing_attribution_uses_same_heuristic_for_all_modes(self) -> None:
+        cases = (
+            (
+                ["completed", "exception", "submitted", "verified", "exception", "submitted", "completed"],
+                ["s3", "s4", "s5", "s6"],
+            ),
+            (["completed"] * 7, ["s4", "s5", "s6", "s7"]),
+            ([], []),
+        )
+        for statuses, expected_steps in cases:
+            steps = [
+                {"step_id": f"s{i}", "execution_status": status, "legacy_event_ids": [f"e{i}"]}
+                for i, status in enumerate(statuses, start=1)
+            ]
+            for mode in ("swe", "gaia", "appworld", "terminal_bench", "openhands"):
+                with self.subTest(mode=mode, statuses=statuses):
+                    bundle = {
+                        "mode": mode,
+                        "agent_trace_steps": steps,
+                        "node_facets": {
+                            step["step_id"]: {
+                                "harness_layer": {"implicated_layers": ["Verification", "Tools", "Tools"]},
+                            }
+                            for step in steps
+                        },
+                        "views": {
+                            "causal": [{"node_id": "causal-event"}],
+                            "failure": [{"node_id": "failure-event"}],
+                        },
+                    }
+                    result = self.runner._enrich_analysis_output(
+                        {"agent_design_issue": "Inspect the system prompt."}, {}, bundle, Path("htir.json"),
+                    )
+                    expected_nodes = [step.replace("s", "e", 1) for step in expected_steps] or ["causal-event"]
+                    self.assertEqual(result["responsible_steps"], expected_steps)
+                    self.assertEqual(result["candidate_responsible_steps"], expected_steps)
+                    self.assertEqual(result["responsible_nodes"], expected_nodes)
+                    self.assertEqual(result["responsible_events"], expected_nodes)
+                    self.assertEqual(result["downstream_nodes"], ["failure-event"])
+                    self.assertEqual(result["implicated_harness_layers"], ["Tools", "Verification"] if steps else [])
+                    self.assertNotIn("_attribution_incomplete", result)
+
+    def test_openhands_preserves_model_attribution(self) -> None:
+        bundle = {
+            "mode": "openhands",
+            "agent_trace_steps": [
+                {"step_id": "s1", "execution_status": "completed", "legacy_event_ids": ["e1"]},
+                {"step_id": "s2", "execution_status": "exception", "legacy_event_ids": ["e2"]},
+            ],
+            "node_facets": {"s2": {"harness_layer": {"implicated_layers": ["Tools"]}}},
+        }
+        diagnosis = {
+            "responsible_steps": ["s1"],
+            "candidate_responsible_steps": ["s1", "s2"],
+            "responsible_nodes": ["model-event"],
+            "implicated_harness_layers": ["Observability"],
+            "confidence": "high",
+        }
+        result = self.runner._enrich_analysis_output(dict(diagnosis), {}, bundle, Path("htir.json"))
+        for field, value in diagnosis.items():
+            self.assertEqual(result[field], value)
+        self.assertEqual(result["responsible_events"], ["model-event"])
+
     def test_analysis_keeps_rollout_evidence_on_exception_or_invalid_submission(self) -> None:
         scenarios = (
             ("exception", RuntimeError("analysis backend unavailable"), ""),
@@ -244,6 +307,17 @@ class OpenHandsAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             eval_result = _write_trace(root, 0, score=0.0)
+            workspace = root / eval_result["workspace_dir"]
+            log_dir = workspace.parent / f"{workspace.name}_logs"
+            completions = log_dir / "llm_completions"
+            completions.mkdir()
+            (completions / "recorded.json").write_text(json.dumps({
+                "messages": [{"role": "user", "content": "Exact recorded request."}],
+                "response": {"id": "recorded-response", "choices": [{
+                    "message": {"role": "assistant", "content": "Exact recorded response."},
+                }]},
+                "timestamp": 1,
+            }))
             eval_path = root / "eval_results.yaml"
             eval_path.write_text(yaml.safe_dump([eval_result]), encoding="utf-8")
             _, traces_root = normalize_rollout(
@@ -270,7 +344,7 @@ class OpenHandsAnalysisTests(unittest.TestCase):
                             RESULTS_DIR=root / "analysis_outputs",
                         ),
                         patch.dict(os.environ, {"HARNESSFIX_MODEL_ALIAS": "test-alias" if name == "model_alias" else ""}),
-                        patch.object(self.runner, "DefaultAgent", return_value=agent),
+                        patch.object(self.runner, "PromptSafeAgent", return_value=agent),
                         patch.object(self.runner, "LitellmTextbasedModel") as model,
                         patch.object(self.runner, "selected_model_kwargs", return_value=alias_kwargs) as bridge_kwargs,
                     ):
@@ -282,6 +356,10 @@ class OpenHandsAnalysisTests(unittest.TestCase):
                     self.assertEqual(result["rollout_id"], 0)
                     self.assertEqual(result["evidence_anchor"]["score"], 0.0)
                     self.assertTrue(Path(result["htir_path"]).is_file())
+                    sanitized = json.loads(Path(agent.run.call_args.kwargs["traj_path"]).read_text())
+                    recorded = next(c for c in sanitized["model_calls"] if c["response_id"] == "recorded-response")
+                    self.assertEqual(recorded["request_messages"][0]["content"], "Exact recorded request.")
+                    self.assertEqual(recorded["response_message"]["content"], "Exact recorded response.")
                     expected_kwargs = config["model"]["model_kwargs"]
                     if name == "model_alias":
                         expected_kwargs = expected_kwargs | alias_kwargs
@@ -299,6 +377,13 @@ class OpenHandsAnalysisTests(unittest.TestCase):
                     else:
                         self.assertFalse(result.get("_analysis_fallback", False))
                         self.assertEqual(result["confidence"], "high")
+                        self.assertTrue(result["responsible_steps"])
+                        self.assertEqual(result["candidate_responsible_steps"], result["responsible_steps"])
+                        self.assertTrue(result["responsible_nodes"])
+                        bundle = json.loads(Path(result["htir_path"]).read_text())
+                        step_ids = {step["step_id"] for step in bundle["agent_trace_steps"]}
+                        self.assertTrue(set(result["responsible_steps"]).issubset(step_ids))
+                        self.assertNotIn("_attribution_incomplete", result)
 
 
 class OpenHandsBundleTests(unittest.TestCase):

@@ -2,7 +2,9 @@
 
 HarnessFix is a trace-guided pipeline for diagnosing failed LLM-agent trajectories and repairing the harness that produced them. This repository contains the four original benchmark integrations from the HarnessFix paper and an adapter that applies the same analysis/repair stages to an OpenHands Software Agent SDK harness executed by [Better Harnesses, Smaller Models](https://github.com/malusamayo/slm-harness-adaptation).
 
-This README is an operational guide for setting up a new machine, selecting Gemini or Qwen, running the original pipelines, and running one complete OpenHands repair iteration.
+This README is an operational guide for setting up a new machine, selecting Gemini or Qwen, and running the original and OpenHands closed-loop pipelines.
+
+For setup with Qwen and native Gemini, see the [Vietnamese setup commands](docs/setup_vi.md), [Qwen configuration](configs/qwen.yaml), and [Gemini configuration](configs/gemini.yaml). Use `scripts/configure_models.py` to configure task execution and analysis/repair models, then run the existing pipeline entry points.
 
 ## 1. What is in this repository
 
@@ -14,7 +16,7 @@ This README is an operational guide for setting up a new machine, selecting Gemi
 | Terminal-Bench | `task_agent/terminal_bench_agent` | Terminal-Bench 2.0 | `run_pipeline_terminal_bench.py` |
 | OpenHands | `task_agent/openhands_agent/original` | Stock Alert, Machine Operating, RefactorBench, WebArena | `task_agent.openhands_agent.bridge` and `run_pipeline_openhands.py` |
 
-The four original drivers implement the closed loop directly. The OpenHands integration is stage-oriented: Better Harness remains responsible for environment setup, execution, and official evaluation; HarnessFix materializes candidates, normalizes the resulting artifacts, diagnoses failures, creates a scoped repair, audits it, and compares paired validation rollouts.
+All five integrations have a closed-loop driver. Better Harness remains responsible for OpenHands environment setup, execution, and official evaluation. HarnessFix materializes candidates, normalizes artifacts, diagnoses failures, creates scoped repairs, audits them, compares train/validation rollouts, and selects a harness using validation. OpenHands also exposes individual stage commands.
 
 The common repair flow is:
 
@@ -40,6 +42,8 @@ enhancement_implementation/    prompts/configuration used by the modifying agent
 task_agent/                    initial harnesses and benchmark runners
 task_agent/final/              final paper snapshots; not the default H0 inputs
 task_agent/openhands_agent/     Better Harness/OpenHands bridge and candidate template
+configs/                       Qwen and Gemini model configuration
+scripts/                       shared model setup
 data/                          sampling/download scripts; raw datasets are not committed
 eval/                          GAIA, AppWorld, and Terminal-Bench evaluators
 traces/, logs/, results/       generated runtime artifacts
@@ -268,11 +272,10 @@ Only prepare the benchmark you intend to run.
 
 ### 5.1 SWE-Bench Verified
 
-Install the official evaluator in the same `.venv` so that `swebench.harness.run_evaluation` is importable:
+Install the official evaluator in the same `.venv` so that `swebench.harness.run_evaluation` is importable. Pin version 4.1.0, which supports this pipeline's `--report_dir` argument, JSON predictions, and evaluation log paths:
 
 ```bash
-git clone https://github.com/SWE-bench/SWE-bench.git ../SWE-bench
-python -m pip install -e ../SWE-bench
+python -m pip install 'swebench==4.1.0'
 ```
 
 Create deterministic, non-overlapping train/validation/test subsets:
@@ -472,6 +475,8 @@ Use the alias in both Better run YAML and HarnessFix's OpenHands `--model` optio
 
 Edit the selected Better task YAML so `model_name` is one of those aliases. The `openai/` prefix selects the OpenAI-compatible protocol; it is stripped before the model ID is sent to the configured endpoint. Keep `model_name`, `prompt_name`, `n_responses`, runtime limits, task IDs, and data fixed between H0 and H1.
 
+Generation settings in `configs/qwen.yaml` and `configs/gemini.yaml` are synchronized by `scripts/configure_models.py` into Better's `configs/models.yaml` and the SWE model registry. Qwen disables thinking with `extra_body.chat_template_kwargs.enable_thinking: false`, following the [Qwen model card](https://huggingface.co/Qwen/Qwen3.5-9B). The packed OpenHands launcher preserves temperature in this mode. Gemini uses temperature `0.2` and `reasoning_effort: low`; [Gemini 3.1 Pro cannot disable thinking entirely](https://ai.google.dev/gemini-api/docs/generate-content/thinking). A null reasoning effort leaves provider defaults in effect.
+
 Build the task images you need:
 
 ```bash
@@ -500,9 +505,91 @@ tasks/<task>/run_harnessfix_val.yaml
 tasks/<task>/run_harnessfix_test.yaml
 ```
 
-These three files should differ only where a split requires it, normally `data_path` and `max_examples`. Validation and test data must remain disjoint from train, and test must never enter the repair loop.
+These three files should differ only where a split requires it: `data_path`, `max_examples`, and the selected `n_responses` for that split. Use one rollout per sample for train/validation and two for the final test. Validation and test data must remain disjoint from train, and test must never enter the repair loop.
 
-## 8. Run one complete OpenHands repair iteration
+The OpenHands bridge enables SDK completion logging for new rollouts in
+`<workspace>_logs/llm_completions/`. Normalized manifests reference those files
+through `llm_completion_paths`; analysis merges recorded requests/responses into
+`model_calls` and HTIR. Older event-only traces remain supported, with missing
+request payloads explicitly marked `not_recorded`. Use a new rollout version to
+capture completion logs; resuming an old rollout cannot recover unrecorded requests.
+
+## 8. Run the OpenHands closed loop
+
+Use one experiment config for Stock Alert:
+
+```bash
+cd /root/HarnessFix-reproduce
+.venv/bin/python -B run_pipeline_openhands.py run --config configs/stock_alert.yaml --dry-run
+.venv/bin/python -B run_pipeline_openhands.py run --config configs/stock_alert.yaml
+```
+
+`configs/stock_alert.yaml` selects test records 1–30, train records 31–40, and
+validation records 41–50, in dataset order. It uses `qwen-vllm` for task execution,
+`gemini-api` for analysis/aggregation/modification, one rollout per train/validation
+record, two rollouts per final test record, and six concurrent task/evaluation
+workers. `execution.n_responses` explicitly defines the `train`, `val`, and `test`
+counts; generated Better run YAMLs each receive a scalar count for their split.
+Each candidate uses the same model parameters, data, seeds, and rollout count
+within a split. This gives 10 train and 10 validation rollouts per candidate,
+followed by 60 test rollouts for the selected final candidate. Other supported tasks
+can use the same config schema with their own dataset, prompt and base run YAML.
+
+The runner follows the current SWE driver: baseline validation, current-base
+train execution/evaluation, complete failure analysis, aggregation, modification,
+audit, candidate train/validation execution, comparison, promotion, repair memory,
+and validation regression analysis for the next iteration. Accepted candidates
+become the next base; rejected candidates are recorded as failed attempts.
+An audit failure prevents candidate execution. Train comparison and cost are
+reported only. Both SWE and OpenHands call `failure_analysis/loop_policy.py` for
+comparison and promotion: audit must pass, validation resolved count and target
+metrics must improve, and error/invalid-submission rate increases must stay within
+the configured limits. Metric availability remains benchmark-specific.
+
+The default limit is three repair iterations, with early stopping after two
+consecutive rejected candidates or when all current-base train rollouts pass.
+The final candidate is chosen only from H0 and promoted versions using validation
+resolved count. With `run_test: true`, only that candidate is evaluated on held-out
+test after selection. With `run_test: false`, the runner prints the separate test
+command, matching the original drivers. Test feedback never enters repair planning.
+Success rates count individual rollouts; they are not pass@2.
+
+Each run prints its directory under `artifacts/openhands/`. Resume an interrupted
+run by specifying that exact directory:
+
+```bash
+.venv/bin/python -B run_pipeline_openhands.py run \
+  --config configs/stock_alert.yaml \
+  --run-dir /absolute/path/to/the/printed/run/directory
+```
+
+Completed stages are reused. Interrupted candidate edits are archived before
+retrying. Config, dataset, model settings and pipeline hashes must match to resume;
+changed settings require a new run directory. After final selection, resume only
+returns the selected result or finishes its test; it does not start more repair.
+Source dataset IDs distinguish samples across splits, independently of local
+`example0` workspace names. Analysis trajectories are separated by run and stage.
+The automatic runner uses the existing repair-memory format and retrieval logic
+in `<run>/memory/`. It starts a new memory for each experiment so previous runs
+using different train/test splits cannot enter its planner context. Individual
+stage commands and original drivers retain their existing default memory path.
+
+```text
+<run>/experiment.json                 configs, split IDs/hashes, model parameters
+<run>/provenance.json                 checkout commits and configured task images
+<run>/configs/run_{train,val,test}.yaml
+<run>/candidates/h0, h1, ...
+<run>/runs/{train,val,test}_hN/        results, trace manifests and trace checksums
+<run>/analysis/*.jsonl                train failures and val regressions
+<run>/memory/                         accepted/rejected repairs from this experiment
+<run>/iterations/vN/                  plan/spec, modifier trace, audit, comparisons,
+                                     promotion decision and iteration report
+<run>/selection.json                  fixed final selection before held-out test
+<run>/summary.json                    selection plus test result when requested
+```
+
+The commands below expose the same stages individually for inspection or a
+single manual repair iteration.
 
 The following example uses RefactorBench. Supported Better task IDs are:
 

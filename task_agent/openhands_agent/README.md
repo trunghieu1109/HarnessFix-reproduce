@@ -19,6 +19,34 @@ Better Harness accepts one `agent_file` in Docker mode. The bridge therefore
 packs the complete candidate directory into a deterministic, self-extracting
 Python launcher. It does not patch Better Harness or OpenHands.
 
+## Candidate initialization retries
+
+The closed-loop runner audits each proposed candidate, then imports the packed launcher and
+calls `build_agent` in a temporary workspace using Better Harness's Python and SDK. This check
+does not start a conversation, create browser/MCP sessions, or evaluate a benchmark sample.
+SDK model requests are blocked during the check.
+The check preserves the task model's name and generation settings, with placeholder connection
+credentials; it does not make a request to the served model.
+
+An import/build failure retries generation of the same version with the original context:
+the same accepted base, plan/spec, prompts, references, model settings, and target directory.
+Each retry starts a fresh modifier session. No previous candidate error, traceback, diff, or
+conversation is added to its input; the pipeline does not pass `--redo-feedback` for these retries.
+`pipeline.max_candidate_retries: 2` permits one initial proposal and two retries;
+`pipeline.candidate_check_timeout: 60` bounds each initialization check in seconds.
+Train/validation scores do not trigger this retry. Audit rejections retain the outer-loop policy.
+
+Each attempt is retained under `iterations/vN/attempts/<attempt>/`, including its candidate,
+modifier trajectory, audit, and `candidate_check.json`. The target directory is moved into the
+attempt archive after generation so the next modifier starts with a fresh copy at the same path.
+After retries are exhausted, the iteration report records `candidate_initialization_failed`
+and the candidate is rejected without running train/val. Its failure is available to the next
+outer iteration through the previous report and repair memory. Infrastructure failures still
+stop the run. Resuming reuses completed attempts and checks.
+
+This changes experiment provenance. Use a new run directory with the updated code; old experiment
+snapshots and candidates are not rewritten.
+
 ## Model aliases
 
 Both Better Harness and the HarnessFix OpenHands stages read

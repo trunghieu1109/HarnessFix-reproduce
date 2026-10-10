@@ -1,0 +1,44 @@
+# Same experiment settings as WebArena: test 30, train 10, val 10.
+better_root: ${BETTER_HARNESS_ROOT}
+task_id: machine_operating_s2l
+prompt_name: default
+dataset: data/machine_operating_s2l.json
+base_run_config: tasks/machine_operating_s2l/run.yaml
+output_root: artifacts/openhands
+
+models:
+  task: qwen-vllm
+  analysis: gemini-api
+
+repair_references:
+  sdk_reference: true
+  read_trajectory: true
+
+# Zero-based, stop-exclusive ranges; splits are disjoint.
+splits:
+  test: {start: 0, stop: 30}
+  train: {start: 30, stop: 40}
+  val: {start: 40, stop: 50}
+
+execution:
+  n_responses:
+    train: 1
+    val: 1
+    test: 2
+  agent_batch_size: 4
+  eval_batch_size: 6
+  success_threshold: 1.0
+
+pipeline:
+  analysis_step_limit: 30  # Model calls per diagnosis, including submission.
+  max_candidate_retries: 2
+  candidate_check_timeout: 60
+  max_iterations: 3
+  max_promotion_failures: 2
+  analysis_workers: 1
+  min_improvement: 1
+  min_target_metrics: 1
+  max_error_rate_delta: 0.15
+  max_invalid_rate_delta: 0.15
+  max_cost_ratio: 1.25
+  run_test: true

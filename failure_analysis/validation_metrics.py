@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from failure_analysis.openhands_trace import load_openhands_trace, openhands_api_call_count
+
 
 LOWER_IS_BETTER = {
     "empty_patch_rate",
@@ -344,17 +346,18 @@ def compute_openhands_metrics(traces_dir: str | Path, eval_path: str | Path) -> 
     total = len(eval_data.get("all_ids", [])) or len(manifest_files)
     costs: list[float] = []
     steps: list[int] = []
+    api_calls: list[int] = []
     repeated_commands = 0
     missing_evidence = 0
 
     for manifest_file in manifest_files:
         manifest = json.loads(manifest_file.read_text())
-        trace_path_value = manifest.get("trace_path")
-        if not trace_path_value or not Path(trace_path_value).exists():
+        try:
+            trace = load_openhands_trace(manifest)
+        except FileNotFoundError:
             missing_evidence += 1
             continue
-        loaded_trace = json.loads(Path(trace_path_value).read_text())
-        trace = loaded_trace if isinstance(loaded_trace, dict) else {"events": loaded_trace}
+        api_calls.append(openhands_api_call_count(trace))
         metrics = trace.get("metrics", {}) or {}
         costs.append(float(metrics.get("accumulated_cost", 0.0) or 0.0))
         events = trace.get("events", []) or []
@@ -379,7 +382,7 @@ def compute_openhands_metrics(traces_dir: str | Path, eval_path: str | Path) -> 
         "missing_evidence_rate": missing_evidence / total if total else 0.0,
         "avg_instance_cost": sum(costs) / total if total else 0.0,
         "avg_steps": sum(steps) / total if total else 0.0,
-        "avg_api_calls": sum(steps) / total if total else 0.0,
+        "avg_api_calls": sum(api_calls) / total if total else 0.0,
     }
     return {"mode": "openhands", "total_instances": total, "metrics": metrics}
 

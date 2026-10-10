@@ -37,12 +37,15 @@ import difflib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
+from failure_analysis.analysis_records import analysis_record_succeeded
+from failure_analysis.loop_policy import compare_runs, decide_promotion
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
 REPO_ROOT = Path(__file__).parent
@@ -78,7 +81,7 @@ def run(cmd: list, env: dict | None = None, check: bool = True,
     merged_env["PATH"] = f"{REPO_ROOT / '.venv' / 'bin'}:{merged_env.get('PATH', '')}"
     print(f"  $ {' '.join(str(c) for c in cmd)}", flush=True)
     try:
-        return subprocess.run(cmd, env=merged_env, check=check, timeout=timeout)
+        return subprocess.run(cmd, cwd=REPO_ROOT, env=merged_env, check=check, timeout=timeout)
     except subprocess.TimeoutExpired:
         print(f"\n[pipeline] ERROR: subprocess timed out after {timeout}s: {cmd[0]}", flush=True)
         raise
@@ -99,6 +102,31 @@ def model_slug(model: str) -> str:
 
 def eval_model_slug(model: str) -> str:
     return model.replace("/", "__")
+
+
+def collect_eval_report(directory: Path, model: str, run_id: str, *,
+                        required: bool = False) -> Path | None:
+    """Collect this model/run's report, including SWE-bench's cwd output.
+
+    SWE-bench 4.1.0 accepts --report_dir but writes its summary to cwd.
+    Comparing modification times also handles an updated root report or an
+    evaluator that writes directly to the requested directory.
+    """
+    filename = f"{eval_model_slug(model)}.{run_id}.json"
+    destination = directory / filename
+    candidates = [path for path in (destination, REPO_ROOT / filename) if path.is_file()]
+    if not candidates:
+        if required:
+            raise FileNotFoundError(
+                f"Evaluator report {filename} not found in {directory} or {REPO_ROOT}"
+            )
+        return None
+    source = max(candidates, key=lambda path: path.stat().st_mtime_ns)
+    if source.resolve() != destination.resolve():
+        directory.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        log(f"  Collected evaluator report → {destination}")
+    return destination
 
 
 def plan_spec_path(plan_path: Path) -> Path:
@@ -227,8 +255,8 @@ def completed_analysis_ids(path: Path) -> set[str]:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        instance_id = record.get("instance_id")
-        if instance_id:
+        instance_id = record.get("instance_id") if isinstance(record, dict) else None
+        if instance_id and analysis_record_succeeded(record):
             completed.add(str(instance_id))
     return completed
 
@@ -278,7 +306,7 @@ def step_train_evaluate(model: str, base_version: int, train_traces: Path, worke
     run_id = train_run_id(model, base_version)
     log(f"Step 1: train evaluate → {report_dir.name}/")
 
-    if find_eval_json(report_dir) and not force:
+    if collect_eval_report(report_dir, model, run_id) and not force:
         log("  train eval results already exist, skipping")
         return report_dir
 
@@ -301,6 +329,7 @@ def step_train_evaluate(model: str, base_version: int, train_traces: Path, worke
         return report_dir
 
     run(cmd)
+    collect_eval_report(report_dir, model, run_id, required=True)
     return report_dir
 
 
@@ -401,7 +430,7 @@ def step_val_baseline_evaluate(model: str, baseline_traces: Path, workers: int,
     run_id = val_baseline_run_id(model)
     log(f"Bootstrap 4: val baseline evaluate → {report_dir.name}/")
 
-    if find_eval_json(report_dir) and not force:
+    if collect_eval_report(report_dir, model, run_id) and not force:
         log("  val baseline eval results already exist, skipping")
         return report_dir
 
@@ -424,6 +453,7 @@ def step_val_baseline_evaluate(model: str, baseline_traces: Path, workers: int,
         return report_dir
 
     run(cmd)
+    collect_eval_report(report_dir, model, run_id, required=True)
     return report_dir
 
 def step_aggregate(version: int, model: str, analysis_results_path: Path, analysis_model: str,
@@ -616,7 +646,7 @@ def step_val_evaluate(version: int, val_traces_dir: Path,
     report_dir = val_enhanced_eval_dir(model, version)
     log(f"Step 6: val evaluate → {report_dir.name}/")
 
-    if find_eval_json(report_dir):
+    if collect_eval_report(report_dir, model, run_id):
         log(f"  eval results already exist, skipping")
         return report_dir
 
@@ -640,6 +670,7 @@ def step_val_evaluate(version: int, val_traces_dir: Path,
         return report_dir
 
     run(cmd)
+    collect_eval_report(report_dir, model, run_id, required=True)
     return report_dir
 
 
@@ -708,50 +739,14 @@ def build_run_comparison(split: str, comparison_type: str, ids_file: Path,
                          baseline_traces_dir: Path, current_traces_dir: Path,
                          plan_path: Path, max_cost_ratio: float) -> dict:
     """Build a resolved/metric/cost comparison for one dataset split."""
-    from failure_analysis.validation_metrics import (
-        compute_cost_ratio,
-        compute_run_metrics,
-        evaluate_target_metrics,
-        load_eval_json,
+    result = compare_runs(
+        mode="swe", split=split, ids_file=ids_file,
+        baseline_eval=baseline_eval_dir, current_eval=current_eval_dir,
+        baseline_traces=baseline_traces_dir, current_traces=current_traces_dir,
+        spec_path=plan_spec_path(plan_path), max_cost_ratio=max_cost_ratio,
     )
-
-    subset = set(ids_file.read_text().split())
-    baseline_path, _ = load_eval_json(baseline_eval_dir)
-    current_path, _ = load_eval_json(current_eval_dir)
-
-    baseline_data = json.loads(baseline_path.read_text())
-    current_data = json.loads(current_path.read_text())
-    baseline_resolved = set(baseline_data.get("resolved_ids", [])) & subset
-    current_resolved = set(current_data.get("resolved_ids", [])) & subset
-    regressed_ids = sorted(baseline_resolved - current_resolved)
-    improved_ids = sorted(current_resolved - baseline_resolved)
-
-    baseline_metrics = compute_run_metrics("swe", baseline_traces_dir, baseline_path)
-    current_metrics = compute_run_metrics("swe", current_traces_dir, current_path)
-    plan_spec = json.loads(plan_spec_path(plan_path).read_text()) if plan_spec_path(plan_path).exists() else {"fixes": []}
-    target_results = evaluate_target_metrics(plan_spec, baseline_metrics, current_metrics)
-    cost_ratio = compute_cost_ratio(baseline_metrics, current_metrics)
-
-    return {
-        "split": split,
-        "comparison_type": comparison_type,
-        "baseline_count": len(baseline_resolved),
-        "current_count": len(current_resolved),
-        "net_change": len(current_resolved) - len(baseline_resolved),
-        "regression_count": len(regressed_ids),
-        "improvement_count": len(improved_ids),
-        "regressed_ids": regressed_ids,
-        "improved_ids": improved_ids,
-        "cost_ratio": cost_ratio,
-        "target_metric_results": target_results,
-        "baseline_metrics": baseline_metrics,
-        "current_metrics": current_metrics,
-        "comparison_config": {
-            "mode": "swe",
-            "ids_file": str(ids_file),
-            "cost_report_threshold": max_cost_ratio,
-        },
-    }
+    result["comparison_type"] = comparison_type
+    return result
 
 
 def step_promotion_decision(version: int, audit: dict, train_compare: dict,
@@ -768,51 +763,12 @@ def step_promotion_decision(version: int, audit: dict, train_compare: dict,
         print("  [DRY RUN] would decide whether to promote candidate")
         return {"passed": False, "promoted": False, "dry_run": True, "regressed_ids": []}
 
-    baseline_metrics = val_compare.get("baseline_metrics", {}).get("metrics", {})
-    current_metrics = val_compare.get("current_metrics", {}).get("metrics", {})
-    error_delta = current_metrics.get("error_rate", 0.0) - baseline_metrics.get("error_rate", 0.0)
-    invalid_delta = (
-        current_metrics.get("invalid_submission_rate", 0.0)
-        - baseline_metrics.get("invalid_submission_rate", 0.0)
+    result = decide_promotion(
+        audit, train_compare, val_compare,
+        min_improvement=min_improvement, min_target_metrics=min_target_metrics,
+        max_error_rate_delta=max_error_rate_delta,
+        max_invalid_rate_delta=max_invalid_rate_delta,
     )
-    target_improved = val_compare.get("target_metric_results", {}).get("improved_metric_count", 0)
-
-    checks = {
-        "audit_passed": bool(audit.get("passed", True)),
-        "net_improvement": val_compare.get("net_change", 0) >= min_improvement,
-        "target_metric_improved": target_improved >= min_target_metrics,
-        "error_delta_within_limit": error_delta <= max_error_rate_delta,
-        "invalid_delta_within_limit": invalid_delta <= max_invalid_rate_delta,
-    }
-    promoted = all(checks.values())
-    failure_reasons = [name for name, passed in checks.items() if not passed]
-
-    result = {
-        "passed": promoted,
-        "promoted": promoted,
-        "decision": "promote" if promoted else "do_not_promote",
-        "failure_reasons": failure_reasons,
-        "checks": checks,
-        "val_net_change": val_compare.get("net_change"),
-        "val_regression_count": val_compare.get("regression_count"),
-        "val_improvement_count": val_compare.get("improvement_count"),
-        "train_net_change": train_compare.get("net_change"),
-        "train_regression_count": train_compare.get("regression_count"),
-        "train_improvement_count": train_compare.get("improvement_count"),
-        "target_improved_metric_count": target_improved,
-        "error_rate_delta": error_delta,
-        "invalid_submission_rate_delta": invalid_delta,
-        "cost_ratio": val_compare.get("cost_ratio"),
-        "cost_gate_enabled": False,
-        "regressed_ids": val_compare.get("regressed_ids", []),
-        "improved_ids": val_compare.get("improved_ids", []),
-        "promotion_config": {
-            "min_improvement": min_improvement,
-            "min_target_metrics": min_target_metrics,
-            "max_error_rate_delta": max_error_rate_delta,
-            "max_invalid_rate_delta": max_invalid_rate_delta,
-        },
-    }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     return result
@@ -1169,6 +1125,14 @@ def main():
             force=args.force,
             dry_run=args.dry_run,
         )
+        if not args.dry_run:
+            eval_json = find_eval_json(train_eval)
+            if eval_json is not None:
+                resolved_ids = set(json.loads(eval_json.read_text()).get("resolved_ids", []))
+                train_ids = set(TRAIN_IDS_FILE.read_text().split())
+                if train_ids and train_ids <= resolved_ids:
+                    log("All train instances passed. No failed trajectories remain for a HarnessFix repair.")
+                    break
         train_analysis = step_train_failure_analysis(
             model=args.model,
             base_version=current_base_version,

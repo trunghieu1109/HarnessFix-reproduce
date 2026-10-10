@@ -1,0 +1,45 @@
+# Zero-based, stop-exclusive ranges. No shuffle: test 1-30, train 31-40, val 41-50.
+better_root: ${BETTER_HARNESS_ROOT}
+task_id: woocommerce_stock_alert_s2l
+prompt_name: default
+dataset: data/woocommerce_stock_alert_s2l.json
+base_run_config: tasks/woocommerce_stock_alert_s2l/run.yaml
+output_root: artifacts/openhands
+
+models:
+  task: qwen-vllm
+  analysis: gemini-api
+
+# Technical documentation for HarnessFix repair stages.
+repair_references:
+  sdk_reference: true
+  read_trajectory: true
+
+splits:
+  test: {start: 0, stop: 30}
+  train: {start: 30, stop: 40}
+  val: {start: 40, stop: 50}
+
+execution:
+  n_responses:
+    train: 1
+    val: 1
+    test: 2
+  agent_batch_size: 6
+  eval_batch_size: 6
+  success_threshold: 1.0
+
+# Same promotion thresholds and outer-loop stopping rule as run_pipeline_swe.py.
+pipeline:
+  analysis_step_limit: 30  # Model calls per diagnosis, including submission.
+  max_candidate_retries: 2  # Retry generation with the same context on import/build failure.
+  candidate_check_timeout: 60
+  max_iterations: 3
+  max_promotion_failures: 2
+  analysis_workers: 1
+  min_improvement: 1
+  min_target_metrics: 1
+  max_error_rate_delta: 0.15
+  max_invalid_rate_delta: 0.15
+  max_cost_ratio: 1.25        # Reported only, as in SWE; not a promotion condition.
+  run_test: true             # Only the selected candidate, after all repair iterations.

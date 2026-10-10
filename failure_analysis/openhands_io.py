@@ -62,13 +62,18 @@ def _trace_error(trace_path: Path | None) -> str | None:
     return str(error) if error else None
 
 
-def _stable_instance_id(task_id: str, example_index: int, rollout_id: int) -> str:
-    safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", task_id).strip("_")
-    return f"{safe_task}__example{example_index}__rollout{rollout_id}"
+def _stable_instance_id(task_id: str, example_index: int, rollout_id: int,
+                        source_example_id: str | None = None) -> str:
+    return f"{_stable_task_instance_id(task_id, example_index, source_example_id)}__rollout{rollout_id}"
 
 
-def _stable_task_instance_id(task_id: str, example_index: int) -> str:
+def _stable_task_instance_id(task_id: str, example_index: int,
+                             source_example_id: str | None = None) -> str:
     safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", task_id).strip("_")
+    if source_example_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", source_example_id):
+            raise ValueError(f"Source example ID is not a safe identifier: {source_example_id!r}")
+        return f"{safe_task}__{source_example_id}"
     return f"{safe_task}__example{example_index}"
 
 
@@ -79,6 +84,7 @@ def normalize_rollout(
     output_dir: Path,
     task_id: str,
     success_threshold: float = 1.0,
+    example_ids: list[str] | None = None,
 ) -> tuple[Path, Path]:
     """Write per-rollout manifests and a HarnessFix-compatible result JSON."""
     eval_results_path = eval_results_path.resolve()
@@ -102,12 +108,16 @@ def normalize_rollout(
             raise ValueError("Each Better Harness eval result must contain workspace_dir")
         workspace = _resolve_workspace(str(eval_result["workspace_dir"]), better_root)
         example_index, rollout_id = _workspace_identity(workspace)
-        instance_id = _stable_instance_id(task_id, example_index, rollout_id)
-        task_instance_id = _stable_task_instance_id(task_id, example_index)
+        source_id = None if example_ids is None else example_ids[example_index]
+        instance_id = _stable_instance_id(task_id, example_index, rollout_id, source_id)
+        task_instance_id = _stable_task_instance_id(task_id, example_index, source_id)
+        if instance_id in normalized_records:
+            raise ValueError(f"Duplicate evaluated rollout: {instance_id}")
         rollout_groups.setdefault(task_instance_id, []).append(instance_id)
         log_dir = workspace.parent / f"{workspace.name}_logs"
         trace_path = _single_trace(log_dir, "trace_*.json")
         raw_trace_path = _single_trace(log_dir, "raw_trace_*.json")
+        completion_paths = sorted((log_dir / "llm_completions").glob("*.json"))
         trace_error = _trace_error(trace_path)
         score_value = eval_result.get("score")
         evaluator_status = "scored"
@@ -135,11 +145,13 @@ def normalize_rollout(
             "task_instance_id": task_instance_id,
             "task_id": task_id,
             "example_index": example_index,
+            "source_example_id": source_id,
             "rollout_id": rollout_id,
             "workspace_dir": str(workspace),
             "log_dir": str(log_dir.resolve()),
             "trace_path": str(trace_path) if trace_path else None,
             "raw_trace_path": str(raw_trace_path) if raw_trace_path else None,
+            "llm_completion_paths": [str(path.resolve()) for path in completion_paths],
             "eval_results_path": str(eval_results_path),
             "eval_result": eval_result,
             "score": score_value,
@@ -156,6 +168,7 @@ def normalize_rollout(
             "instance_id": instance_id,
             "task_instance_id": task_instance_id,
             "example_index": example_index,
+            "source_example_id": source_id,
             "rollout_id": rollout_id,
             "score": score_value,
             "resolved": resolved,
