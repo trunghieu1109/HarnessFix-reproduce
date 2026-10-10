@@ -4,7 +4,19 @@ HarnessFix is a trace-guided pipeline for diagnosing failed LLM-agent trajectori
 
 This README is an operational guide for setting up a new machine, selecting Gemini or Qwen, and running the original and OpenHands closed-loop pipelines.
 
-For setup with Qwen and native Gemini, see the [Vietnamese setup commands](docs/setup_vi.md), [Qwen configuration](configs/qwen.yaml), and [Gemini configuration](configs/gemini.yaml). Use `scripts/configure_models.py` to configure task execution and analysis/repair models, then run the existing pipeline entry points.
+The [complete Vietnamese setup and run guide](docs/setup_vi.md) covers host tools,
+both reproduce checkouts, SDK patches, model endpoints/credentials, all four
+OpenHands tasks, SWE-Bench, GAIA, Terminal-Bench and AppWorld, plus dry runs,
+resume and held-out test. Use the [Qwen](configs/qwen.yaml) and
+[Gemini](configs/gemini.yaml) profiles with `scripts/configure_models.py`.
+
+| Setup/run topic | Commands |
+|---|---|
+| Host and Python environments | [Guide sections 1–3](docs/setup_vi.md#1-công-cụ-host-và-hai-checkout) |
+| Task and analysis model configuration | [Guide section 4](docs/setup_vi.md#4-cấu-hình-model-và-kiểm-tra-kết-nối) |
+| Stock Alert, Machine Operating, RefactorBench, WebArena | [Guide section 5](docs/setup_vi.md#5-setup-và-chạy-bốn-benchmark-openhands) |
+| SWE-Bench, GAIA, Terminal-Bench, AppWorld | [Guide section 6](docs/setup_vi.md#6-setup-và-chạy-các-benchmark-gốc) |
+| Resume and test | [Guide section 7](docs/setup_vi.md#7-resume-test-cuối-và-đọc-kết-quả) |
 
 ## 1. What is in this repository
 
@@ -79,7 +91,7 @@ Ubuntu 24.04 LTS is the simplest native setup because its repositories include P
 ```bash
 sudo apt update
 sudo apt install -y \
-  ca-certificates curl git git-lfs jq build-essential \
+  ca-certificates curl git git-lfs jq ripgrep build-essential \
   python3.12 python3.12-venv python3-pip
 
 git lfs install
@@ -135,8 +147,11 @@ Now continue with section 3. The HarnessFix virtual environment and Better Harne
 ## 3. Install HarnessFix
 
 ```bash
-git clone <HARNESSFIX_REPOSITORY_URL> HarnessFix-reproduce
+git clone https://github.com/trunghieu1109/HarnessFix-reproduce.git HarnessFix-reproduce
 cd HarnessFix-reproduce
+export HARNESSFIX_ROOT="$PWD"
+export BETTER_ROOT="$HOME/slm-harness-adaptation-reproduce"
+export BETTER_HARNESS_ROOT="$BETTER_ROOT"
 
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -152,7 +167,8 @@ python -m pip install -e task_agent/open_deep_research
 # Required for Terminal-Bench.
 python -m pip install -e task_agent/terminal_bench_agent/harbor
 
-cp .env.example .env
+if [ ! -f .env ]; then cp .env.example .env; fi
+chmod 600 .env
 ```
 
 The repository deliberately excludes credentials, raw benchmark data, traces, and generated evaluations. Never commit `.env`.
@@ -166,105 +182,52 @@ python -m json.tool task_agent/model_registry.json >/dev/null
 
 ## 4. Configure Gemini or Qwen
 
-All HarnessFix model calls use LiteLLM provider-qualified IDs. There are three possible routes:
+Configure model IDs, endpoints and credentials before starting a new experiment.
+`configure_models.py` requires a Better Harness checkout even when preparing an
+original benchmark. Complete section 7 before using it, or follow the Vietnamese
+guide's checkout → environment → model order in sections 1–4.
+The [model setup commands](docs/setup_vi.md#4-cấu-hình-model-và-kiểm-tra-kết-nối)
+create local profiles from `configs/qwen.yaml` and `configs/gemini.yaml`, probe
+model discovery/chat/tool calls, and keep credentials in `.env`.
 
-| Route | HarnessFix CLI model ID | Endpoint/credential |
+| Route | Model ID | Connection |
 |---|---|---|
-| Self-hosted Qwen with vLLM | `openai/<served-model-name>` | `OPENAI_API_BASE`, `OPENAI_API_KEY` |
-| Google AI Studio | `gemini/gemini-2.5-flash` | `GEMINI_API_KEY` |
+| Qwen on an OpenAI-compatible server | `openai/<served-model-id>` | HTTP(S) endpoint ending in `/v1`, `QWEN_API_KEY` |
+| Gemini on an OpenAI-compatible gateway | `openai/<gateway-model-id>` | Gateway endpoint ending in `/v1`, `GEMINI_API_KEY` |
+| Native Gemini | `gemini/<native-model-id>` | `api_base: null`, Google `GEMINI_API_KEY` |
 
-### 4.1 Qwen served by vLLM
+The `openai/` prefix selects the API protocol. Replace the profile endpoint
+placeholders with actual URLs; `configure_models.py` does not resolve a bare
+`QWEN_BASE_URL`/`GEMINI_BASE_URL` string in a profile. The task endpoint must be
+reachable inside Docker, and OpenHands requires native function/tool calls.
+Set token budgets to fit the server's context, reserving room for output.
 
-This is the appropriate route when you already have a Qwen server exposing [vLLM's OpenAI-compatible API](https://docs.vllm.ai/en/latest/serving/online_serving/openai_compatible_server/).
-
-First query the server for the exact model ID. Do not guess it from the Hugging Face repository name because vLLM may have been started with a different `--served-model-name`:
-
-```bash
-export OPENAI_API_BASE=http://MODEL_SERVER_HOST:8000/v1
-export OPENAI_API_KEY=EMPTY  # Replace if the server enforces a key.
-
-curl -fsS "$OPENAI_API_BASE/models" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" | jq
-```
-
-Suppose `data[0].id` is `Qwen/Qwen3-Coder-30B-A3B-Instruct`. Put this in `.env`:
-
-```dotenv
-VLLM_MODEL=openai/Qwen/Qwen3-Coder-30B-A3B-Instruct
-OPENAI_API_BASE=http://MODEL_SERVER_HOST:8000/v1
-OPENAI_API_KEY=EMPTY
-```
-
-The `openai/` prefix tells LiteLLM which protocol to use. It is not part of the model name sent to vLLM. `VLLM_MODEL` is a repository convenience variable; commands still receive it through `--model`.
-
-Load the values and test both model discovery and chat completion:
+After creating the local profiles and exporting the appropriate credentials:
 
 ```bash
+cd "$HARNESSFIX_ROOT"
+.venv/bin/python -B scripts/configure_models.py \
+  --config configs/qwen.local.yaml \
+  --analysis-config configs/gemini.local.yaml \
+  --better-root "$BETTER_ROOT"
+
 set -a
 source .env
 set +a
-
-export MODEL="$VLLM_MODEL"
-python - <<'PY'
-import os
-from litellm import completion
-
-response = completion(
-    model=os.environ["MODEL"],
-    api_base=os.environ["OPENAI_API_BASE"],
-    api_key=os.environ["OPENAI_API_KEY"],
-    messages=[{"role": "user", "content": "Reply with exactly OK."}],
-    max_tokens=8,
-)
-print(response.choices[0].message.content)
-PY
 ```
 
-OpenAI-compatible chat completion alone is insufficient for the OpenHands track: the vLLM deployment and Qwen chat template must also support OpenAI-format function/tool calls. Verify a request containing `tools` before a full benchmark run. The required vLLM tool parser is model- and vLLM-version-specific.
+This sets `HARNESSFIX_TASK_MODEL` and `HARNESSFIX_ANALYSIS_MODEL` independently,
+adds `qwen-vllm`/`gemini-api` aliases to Better's model registry, and updates the
+SWE registry and analysis/repair model kwargs. For one model, omit
+`--analysis-config`. To update only analysis, use `--analysis-only` with its
+profile. For OpenHands, experiment YAML model aliases must match the registry;
+changing the selected profile does not rewrite experiment YAMLs.
 
-```bash
-python - <<'PY'
-import os
-from litellm import completion
-
-response = completion(
-    model=os.environ["VLLM_MODEL"],
-    api_base=os.environ["OPENAI_API_BASE"],
-    api_key=os.environ["OPENAI_API_KEY"],
-    messages=[{"role": "user", "content": "Use the health_check tool."}],
-    tools=[{
-        "type": "function",
-        "function": {
-            "name": "health_check",
-            "description": "Return server health.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    }],
-    tool_choice="required",
-    max_tokens=128,
-)
-tool_calls = response.choices[0].message.tool_calls
-assert tool_calls, response
-print(tool_calls)
-PY
-```
-
-The OpenHands agent runs inside Docker. Therefore `OPENAI_API_BASE=http://127.0.0.1:8000/v1` normally points back to the container, not the Ubuntu host. Prefer a DNS name or LAN address reachable from both the host and task containers. If vLLM is on the same host, bind it to an appropriate non-loopback interface and secure access at the network/reverse-proxy layer.
-
-### 4.2 Gemini
-
-For Google AI Studio, leave `OPENAI_API_BASE` and `LITELLM_API_BASE` empty and set:
-
-```dotenv
-GEMINI_API_KEY=your-key
-HARNESSFIX_VISION_MODEL=gemini/gemini-2.5-flash
-```
-
-Use `gemini/gemini-2.5-flash` as `--model` for the original HarnessFix pipelines. The OpenHands bridge in section 8 takes the Better Harness alias instead and reads its model settings from `configs/models.yaml`.
-
-`HARNESSFIX_VISION_MODEL` is used only by GAIA's image tool. A text-only Qwen vLLM deployment cannot handle that tool; point it to Gemini or to a separately served multimodal model. It is not required for the other benchmark tracks.
-
-Use the same execution model name, endpoint, decoding parameters, and server configuration for H0 and every candidate compared against it. The analysis/repair model may differ, but record it with the experiment.
+GAIA, AppWorld and Terminal-Bench still read analysis/modifier connection kwargs
+from their own YAML files. Follow [guide section 4.4](docs/setup_vi.md#44-model-cho-gaia-appworld-và-terminal-bench)
+before running them. The documented commands use the task model for their
+analysis/repair; two models with separate endpoints need per-stage connection
+configuration. SWE and OpenHands already resolve connections independently.
 
 ## 5. Prepare the original HarnessFix benchmarks
 
@@ -320,11 +283,22 @@ This creates `gaia_train_60`, `gaia_val_30`, and `gaia_test_60` under `data/`.
 
 ### 5.3 Terminal-Bench 2.0
 
-Download the pinned verified source and create the manifest-defined splits:
+For a fresh checkout without a private split manifest, download the official
+GitHub source and create deterministic local splits:
 
 ```bash
-python data/download_terminal_bench.py
+python data/download_terminal_bench.py --source github --skip-sampling
+python data/sample_terminal_bench.py \
+  --source data/terminal_bench_2_verified --random-split \
+  --train 34 --val 17 --test 34 --seed 20260522
+git -C data/terminal_bench_2_verified rev-parse HEAD
 ```
+
+The driver retains the `terminal_bench_2_verified` directory name for this
+source. To reproduce a previous ZAI verified experiment, provide its manifest
+with pinned `source_commit` and task IDs; see [Terminal-Bench setup](docs/setup_vi.md#63-terminal-bench-20).
+The default downloader expects `data/terminal_bench_splits.json`, which is not
+included in this checkout.
 
 The output is:
 
@@ -338,7 +312,7 @@ data/terminal_bench_test/
 The sampler uses symlinks by default. On filesystems where symlinks are unavailable, use:
 
 ```bash
-python data/download_terminal_bench.py --copy-splits
+python data/sample_terminal_bench.py --random-split --copy
 ```
 
 ### 5.4 AppWorld
@@ -349,7 +323,13 @@ Build the pinned execution image:
 docker build -t appworld-agent-pypi:latest task_agent/appworld_agent
 ```
 
-Install/download AppWorld according to its official instructions and set `APPWORLD_ROOT` to a host directory containing its `data/` directory. Build or restore a task cache at `APPWORLD_TASK_CACHE`. The cache must be a JSON object with `train`, `dev`, `test_normal`, and `test_challenge` task lists.
+Follow the [complete AppWorld setup commands](docs/setup_vi.md#64-appworld) to
+download data using the pinned image, set absolute paths in `.env`, and build
+`APPWORLD_TASK_CACHE` from the official task metadata inside Docker. The cache
+contains `train`, `dev`, `test_normal` and `test_challenge` lists; it supplies the
+instruction/supervisor fields required by the local runner without exporting
+answers. The host vendored AppWorld shim is for the agent adapter, so use the
+real AppWorld package inside the image for task loading.
 
 ```dotenv
 APPWORLD_ROOT=/absolute/path/to/appworld_root
@@ -363,27 +343,32 @@ Then sample:
 python data/sample_appworld.py
 ```
 
-This creates `appworld_train_90`, `appworld_val_45`, and `appworld_test_90` under `data/`. The cache builder itself is not included, so preserve the cache and its hash if you need an exactly reproducible split on another machine.
+This creates `appworld_train_90`, `appworld_val_45`, and `appworld_test_90` under `data/`. The inline cache-building command is in the setup guide. Preserve the cache and its hash to reproduce the same split on another machine.
 
 ## 6. Run the original closed-loop pipelines
 
-Load the provider configuration and choose one provider-qualified model. For the vLLM setup from section 4.1:
+Load the model settings from section 4 and complete the benchmark-specific setup:
 
 ```bash
 set -a
 source .env
 set +a
-export MODEL="$VLLM_MODEL"
+export MODEL="$HARNESSFIX_TASK_MODEL"
+export ANALYSIS_MODEL="$HARNESSFIX_ANALYSIS_MODEL"
+export LEGACY_ANALYSIS_MODEL="${LEGACY_ANALYSIS_MODEL:-$HARNESSFIX_TASK_MODEL}"
 ```
 
-Run one repair iteration first. Increase `--max-iterations` only after the smoke run succeeds.
+Add `--dry-run` to inspect commands after preparing data. The examples below
+run one repair iteration; increase `--max-iterations` to 3 for the full loop.
+For GAIA/AppWorld/Terminal-Bench, first synchronize the connection YAMLs in guide
+section 4.4 with `LEGACY_ANALYSIS_MODEL`.
 
 SWE-Bench:
 
 ```bash
 python run_pipeline_swe.py \
   --model "$MODEL" \
-  --analysis-model "$MODEL" \
+  --analysis-model "$ANALYSIS_MODEL" \
   --workers 2 \
   --max-iterations 1
 ```
@@ -393,7 +378,7 @@ GAIA:
 ```bash
 python run_pipeline_gaia.py \
   --model "$MODEL" \
-  --analysis-model "$MODEL" \
+  --analysis-model "$LEGACY_ANALYSIS_MODEL" \
   --workers 2 \
   --concurrency 2 \
   --max-iterations 1
@@ -404,7 +389,7 @@ Terminal-Bench:
 ```bash
 python run_pipeline_terminal_bench.py \
   --model "$MODEL" \
-  --analysis-model "$MODEL" \
+  --analysis-model "$LEGACY_ANALYSIS_MODEL" \
   --workers 2 \
   --max-iterations 1
 ```
@@ -414,7 +399,7 @@ AppWorld:
 ```bash
 python run_pipeline_appworld.py \
   --model "$MODEL" \
-  --analysis-model "$MODEL" \
+  --analysis-model "$LEGACY_ANALYSIS_MODEL" \
   --workers 2 \
   --concurrency 2 \
   --max-iterations 1
@@ -444,33 +429,75 @@ Keep Better Harness in a sibling directory with its own `uv` environment:
 
 ```bash
 cd ..
-git clone --recurse-submodules https://github.com/malusamayo/slm-harness-adaptation.git
-cd slm-harness-adaptation
+git clone --recurse-submodules https://github.com/trunghieu1109/slm-harness-adaptation-reproduce.git
+cd slm-harness-adaptation-reproduce
 git submodule update --init --recursive
-uv sync
 
 export BETTER_ROOT="$PWD"
 export HARNESSFIX_ROOT="$(cd ../HarnessFix-reproduce && pwd)"
 ```
 
-For strict reproduction, record and reuse both repository revisions:
+This reproduction keeps the SDK Docker startup fixes in
+[`patches/software-agent-sdk-docker-startup.patch`](patches/software-agent-sdk-docker-startup.patch),
+based on SDK commit `89c21968922afc746bca8a653712038d5a38d6aa`. The patch cleans up
+containers after failed startup, uses a monotonic health-check timer, preserves
+health-check error details, and prevents the log thread from joining itself. It
+also includes the corresponding workspace tests. Apply it locally after
+initializing the submodule; the SDK submodule revision stays unchanged and no
+push to the shared SDK repository is required.
+
+On a checkout where the patch has not been applied:
+
+```bash
+git -C "$BETTER_ROOT/software-agent-sdk" apply --check \
+  "$HARNESSFIX_ROOT/patches/software-agent-sdk-docker-startup.patch"
+git -C "$BETTER_ROOT/software-agent-sdk" apply \
+  "$HARNESSFIX_ROOT/patches/software-agent-sdk-docker-startup.patch"
+```
+
+If the checkout already contains these fixes, skip the two commands above.
+Verify that the patch is present with:
+
+```bash
+git -C "$BETTER_ROOT/software-agent-sdk" apply --reverse --check \
+  "$HARNESSFIX_ROOT/patches/software-agent-sdk-docker-startup.patch"
+```
+
+The patched submodule will appear as modified (`-dirty` in the parent diff).
+The patch file is the versioned record of those changes. Better Harness installs
+`openhands-workspace` from this checkout as an editable dependency. Install its
+dependencies after applying the patch:
+
+```bash
+cd "$BETTER_ROOT"
+uv sync --python 3.14
+
+# Needed as a mounted file even when using a non-Vertex model.
+test -e .vertex-ai.json || printf '%s\n' '{}' > .vertex-ai.json
+```
+
+For strict reproduction, record and reuse both repository revisions, the SDK
+revision, and the patch checksum. Apply the same patch before all H0, H1, and
+held-out test runs:
 
 ```bash
 git -C "$BETTER_ROOT" rev-parse HEAD
 git -C "$HARNESSFIX_ROOT" rev-parse HEAD
+git -C "$BETTER_ROOT/software-agent-sdk" rev-parse HEAD
+sha256sum "$HARNESSFIX_ROOT/patches/software-agent-sdk-docker-startup.patch"
 ```
 
 Better Harness and the OpenHands analysis, aggregation, and modification stages now read the same model entries from `$BETTER_ROOT/configs/models.yaml`. API keys and base URLs can be literal values in that file or `${VAR}` references resolved from `$BETTER_ROOT/.env` or the environment. Use LiteLLM provider-qualified IDs for OpenAI-compatible endpoints:
 
 ```bash
-cat "$BETTER_ROOT/configs/models.yaml"
+uv run python -c 'from src.utils import LM_DICT; print(sorted(LM_DICT))'
 ```
 
 Use the alias in both Better run YAML and HarnessFix's OpenHands `--model` option:
 
 | Location | Gemini | Self-hosted Qwen/vLLM |
 |---|---|---|
-| Model alias | `gemini-3.1-pro-low` | `qwen-vllm` |
+| Model alias | `gemini-api` | `qwen-vllm` |
 | LiteLLM model ID in Better config | `openai/ag/gemini-3.1-pro-low` | `openai/Qwen/Qwen3.5-9B` |
 
 Edit the selected Better task YAML so `model_name` is one of those aliases. The `openai/` prefix selects the OpenAI-compatible protocol; it is stripped before the model ID is sent to the configured endpoint. Keep `model_name`, `prompt_name`, `n_responses`, runtime limits, task IDs, and data fixed between H0 and H1.
@@ -481,20 +508,25 @@ Build the task images you need:
 
 ```bash
 cd "$BETTER_ROOT"
-env UID="$(id -u)" docker compose build \
+benchmark_uid="$(id -u)"
+if [ "$benchmark_uid" -eq 0 ]; then benchmark_uid=1000; fi
+BENCHMARK_UID="$benchmark_uid" docker compose build \
   woocommerce_stock_alert_s2l \
   machine_operating_s2l \
   refactorbench \
   webarena
 ```
 
-The image creates a non-root `appuser` with this UID. If `id -u` prints `0`, run the build and benchmark as a regular host user so the UID is nonzero and mounted workspaces remain writable. For a build-only check while running as root, use `env UID=1000 docker compose build machine_operating_s2l`; the later rollout may still need workspace ownership adjusted for that UID.
+Compose in this reproduce checkout uses `BENCHMARK_UID` and creates a non-root
+`appuser`; the command selects UID 1000 on a root host. The SLM task setup makes
+rollout workspaces writable. Build only the task images needed; OpenHands uses
+the regular images, while `_codex` images belong to a separate runtime.
 
 Additional task setup remains owned by Better Harness:
 
 - Stock Alert and Machine Operating use its LOCA-bench submodule and task services.
-- RefactorBench requires a local clone of `microsoft/RefactorBench` and the correct repository path in the task data.
-- WebArena requires `webarena-verified`; start the shopping-admin environment and network as required by `tasks/webarena/run.yaml`.
+- RefactorBench requires the official repository snapshots, `REFACTORBENCH_REPOS_DIR` in the launching shell, and host Python 3.11 for its evaluator; see [setup commands](docs/setup_vi.md#52-source-repository-cho-refactorbench).
+- WebArena requires the shopping-admin site started before collection; see [site startup and GET health check](docs/setup_vi.md#53-website-cho-webarena). The experiment supplies `eval_model: gemini-api` for fuzzy matching.
 - Better's `data/*.json` files are the raw task datasets. For a fair HarnessFix study, create disjoint train, validation, and held-out test JSON files and corresponding run YAMLs before any repair. The bridge does not invent a split.
 
 A practical convention is:
@@ -516,10 +548,25 @@ capture completion logs; resuming an old rollout cannot recover unrecorded reque
 
 ## 8. Run the OpenHands closed loop
 
-Use one experiment config for Stock Alert:
+Prepared closed-loop configs cover all four tasks:
+
+| Task | Config | Train / val / test samples | Test responses | Agent batch |
+|---|---|---|---:|---:|
+| Stock Alert | `configs/stock_alert.yaml` | 10 / 10 / 30 | 2 | 6 |
+| Machine Operating | `configs/machine_operating_batch4.yaml` | 10 / 10 / 30 | 2 | 4 |
+| RefactorBench | `configs/refactorbench_batch4.yaml` | 10 / 10 / 30 | 2 | 4 |
+| WebArena Shopping Admin | `configs/webarena.yaml` | 10 / 10 / 30 | 2 | 4 |
+
+Each full config has 30 model calls per diagnosis, at most 3 repair iterations,
+evaluation batch size 6, and test after selection. See [the setup/run guide](docs/setup_vi.md#5-setup-và-chạy-bốn-benchmark-openhands)
+for prerequisite images, repository snapshots, websites and direct commands.
+`configs/stock_alert_smoke.yaml` uses train/val 10/10, test 5 × 1, analysis budget
+10 and one repair iteration.
+
+For example, Stock Alert:
 
 ```bash
-cd /root/HarnessFix-reproduce
+cd "$HARNESSFIX_ROOT"
 .venv/bin/python -B run_pipeline_openhands.py run --config configs/stock_alert.yaml --dry-run
 .venv/bin/python -B run_pipeline_openhands.py run --config configs/stock_alert.yaml
 ```
@@ -606,7 +653,7 @@ Set paths and models:
 cd "$HARNESSFIX_ROOT"
 export TASK=refactorbench
 export PROMPT=default
-export ANALYSIS_MODEL=qwen-vllm  # or gemini-3.1-pro-low
+export ANALYSIS_MODEL=gemini-api  # or qwen-vllm after configuring that alias
 ```
 
 ### 8.1 Materialize H0
@@ -791,7 +838,7 @@ Do not run `analyze`, `aggregate`, `modify`, or a promotion gate on `test_h1`. I
 
 Before comparing H0 and H1, verify:
 
-- The Better Harness commit, OpenHands SDK submodule commit, task images, task services, and evaluator commit are recorded.
+- The Better Harness commit, OpenHands SDK submodule commit, SDK startup patch checksum, task images, task services, and evaluator commit are recorded. The same SDK patch is applied for every candidate and split.
 - The train/validation/test task IDs are disjoint and their input files are hashed.
 - H0 and H1 use identical Better run YAML values except the bridge-owned `agent_file` and `rollout_version`.
 - All failed train rollouts are analyzed and grouped by stable task instance ID.

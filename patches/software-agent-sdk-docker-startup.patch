@@ -1,0 +1,147 @@
+diff --git a/openhands-workspace/openhands/workspace/docker/workspace.py b/openhands-workspace/openhands/workspace/docker/workspace.py
+index 95ccd854..e9c70470 100644
+--- a/openhands-workspace/openhands/workspace/docker/workspace.py
++++ b/openhands-workspace/openhands/workspace/docker/workspace.py
+@@ -160,7 +160,11 @@ class DockerWorkspace(RemoteWorkspace):
+         # Subclasses should call get_image() to get the image to use
+         # This allows them to build or prepare the image before container startup
+         image = self.get_image()
+-        self._start_container(image, context)
++        try:
++            self._start_container(image, context)
++        except Exception:
++            self.cleanup()
++            raise
+ 
+     def get_image(self) -> str:
+         """Get the Docker image to use for the container.
+@@ -324,19 +328,23 @@ class DockerWorkspace(RemoteWorkspace):
+ 
+     def _wait_for_health(self, *, timeout: float) -> None:
+         """Wait for the Docker container to become healthy."""
+-        start = time.time()
++        start = time.monotonic()
+         # We can construct the health URL based on self.host if available,
+         # or fallback to localhost
+         base_url = self.host.rstrip("/")
+         health_url = f"{base_url}/health"
++        last_error: Exception | None = None
+ 
+-        while time.time() - start < timeout:
++        while time.monotonic() - start < timeout:
+             try:
+                 with urlopen(health_url, timeout=1.0) as resp:
+-                    if 200 <= getattr(resp, "status", 200) < 300:
++                    if 200 <= resp.status < 300:
+                         return
+-            except Exception:
+-                pass
++                    last_error = RuntimeError(
++                        f"Health check returned HTTP {resp.status}"
++                    )
++            except Exception as exc:
++                last_error = exc
+ 
+             # Check if container is still running
+             if self._container_id:
+@@ -357,7 +365,12 @@ class DockerWorkspace(RemoteWorkspace):
+                     )
+                     raise RuntimeError(msg)
+             time.sleep(1)
+-        raise RuntimeError("Container failed to become healthy in time")
++        raise RuntimeError(
++            "Container failed to become healthy in time: "
++            f"timeout={timeout:g}s, container={self._container_id}, "
++            f"health_url={health_url}, "
++            f"last_error={type(last_error).__name__}: {last_error}"
++        ) from last_error
+ 
+     def __enter__(self) -> "DockerWorkspace":
+         """Context manager entry - returns the workspace itself."""
+@@ -376,7 +389,11 @@ class DockerWorkspace(RemoteWorkspace):
+         if self._container_id:
+             # Stop logs streaming
+             self._stop_logs.set()
+-            if self._logs_thread and self._logs_thread.is_alive():
++            if (
++                self._logs_thread
++                and self._logs_thread.is_alive()
++                and self._logs_thread is not threading.current_thread()
++            ):
+                 self._logs_thread.join(timeout=2)
+ 
+             # Stop and remove the container
+diff --git a/tests/workspace/test_docker_workspace.py b/tests/workspace/test_docker_workspace.py
+index 418fa9f6..bb0dec42 100644
+--- a/tests/workspace/test_docker_workspace.py
++++ b/tests/workspace/test_docker_workspace.py
+@@ -3,8 +3,10 @@
+ import os
+ import subprocess
+ import sys
++import threading
+ from pathlib import Path
+ from unittest.mock import MagicMock, Mock, patch
++from urllib.error import URLError
+ 
+ import pytest
+ from pydantic import ValidationError
+@@ -142,6 +144,58 @@ def test_cleanup_with_image_deletion(mock_docker_workspace):
+     assert "test:latest" in rmi_call_args
+ 
+ 
++def test_failed_constructor_stops_its_container():
++    def fail_after_container_start(workspace, image, context):
++        workspace._container_id = "failed-startup-container"
++        raise RuntimeError("Container failed to become healthy in time")
++
++    with (
++        patch.object(
++            DockerWorkspace, "_start_container", new=fail_after_container_start
++        ),
++        patch("openhands.workspace.docker.workspace.execute_command") as execute,
++    ):
++        execute.return_value = Mock(returncode=0, stdout="", stderr="")
++        with pytest.raises(RuntimeError, match="Container failed"):
++            DockerWorkspace(server_image="test:latest")
++        execute.assert_called_once_with(["docker", "stop", "failed-startup-container"])
++
++
++def test_cleanup_from_log_thread_does_not_join_itself(mock_docker_workspace):
++    workspace, execute = mock_docker_workspace()
++    current = threading.current_thread()
++    workspace._logs_thread = current
++    with patch.object(current, "join") as join:
++        workspace.cleanup()
++    join.assert_not_called()
++    execute.assert_called_once_with(["docker", "stop", "container_id_123"])
++    assert workspace._container_id is None
++
++
++def test_health_timeout_preserves_connection_error_and_container_id(
++    mock_docker_workspace,
++):
++    workspace, execute = mock_docker_workspace()
++    workspace.host = "http://127.0.0.1:30379"
++    execute.return_value = Mock(returncode=0, stdout="true", stderr="")
++    error = URLError("connection refused")
++    with (
++        patch("openhands.workspace.docker.workspace.urlopen", side_effect=error),
++        patch(
++            "openhands.workspace.docker.workspace.time.monotonic",
++            side_effect=[0, 0, 2],
++        ),
++        patch("openhands.workspace.docker.workspace.time.sleep"),
++    ):
++        with pytest.raises(RuntimeError, match="Container failed") as failure:
++            workspace._wait_for_health(timeout=1)
++    message = str(failure.value)
++    assert "container=container_id_123" in message
++    assert "health_url=http://127.0.0.1:30379/health" in message
++    assert "last_error=URLError: <urlopen error connection refused>" in message
++    assert failure.value.__cause__ is error
++
++
+ def test_docker_network(mock_docker_workspace):
+     """Test that specifying `network` passes the value to Docker."""
+ 
