@@ -18,6 +18,7 @@ from failure_analysis.operator_registry import operator_allowed_paths
 from failure_analysis.plan_diff_audit import audit_candidate
 from failure_analysis.validation_metrics import compute_openhands_metrics
 from task_agent.openhands_agent.bridge import pack_candidate
+from tests.diagnosis_fixtures import valid_diagnosis
 
 
 def _write_trace(
@@ -301,8 +302,11 @@ class OpenHandsAnalysisTests(unittest.TestCase):
         scenarios = (
             ("exception", RuntimeError("analysis backend unavailable"), ""),
             ("invalid_json", None, "not a diagnosis JSON"),
-            ("submitted", None, json.dumps({"agent_design_issue": "Inspect the system prompt.", "confidence": "high"})),
-            ("model_alias", None, json.dumps({"agent_design_issue": "Inspect the system prompt.", "confidence": "high"})),
+            ("submitted", None, json.dumps(valid_diagnosis("refactorbench__example0__rollout0", confidence="high"))),
+            ("model_alias", None, json.dumps(valid_diagnosis("refactorbench__example0__rollout0", confidence="high"))),
+            ("empty_object", None, "{}"),
+            ("array", None, "[]"),
+            ("invalid_step", None, json.dumps(valid_diagnosis("refactorbench__example0__rollout0", responsible_steps=["s999"]))),
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -374,6 +378,10 @@ class OpenHandsAnalysisTests(unittest.TestCase):
                     elif name == "invalid_json":
                         self.assertTrue(result["_analysis_fallback"])
                         self.assertTrue(result["_parse_error"])
+                    elif name in {"empty_object", "array", "invalid_step"}:
+                        self.assertTrue(result["_analysis_fallback"])
+                        self.assertEqual(result["exit_status"], "analysis_invalid_diagnosis")
+                        self.assertTrue(result["_analysis_validation_errors"])
                     else:
                         self.assertFalse(result.get("_analysis_fallback", False))
                         self.assertEqual(result["confidence"], "high")

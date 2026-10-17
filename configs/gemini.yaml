@@ -1,7 +1,7 @@
 # Gemini served by an OpenAI-compatible gateway.
 # openai/ selects the HTTP protocol; the backend model remains Gemini.
 name: gemini-api
-model: openai/ag/gemini-3.1-pro-low
+model: openai/ag/gemini-3.8-flash-low
 api_base: GEMINI_BASE_URL
 api_key_env: GEMINI_API_KEY
 
@@ -9,5 +9,5 @@ api_key_env: GEMINI_API_KEY
 max_input_tokens: 250000
 max_output_tokens: 8192
 temperature: 0.2
-# Gemini 3.1 Pro supports low thinking, but cannot disable it completely.
+# Request low reasoning through the OpenAI-compatible gateway.
 reasoning_effort: low

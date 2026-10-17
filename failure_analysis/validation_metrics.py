@@ -359,7 +359,9 @@ def compute_openhands_metrics(traces_dir: str | Path, eval_path: str | Path) -> 
             continue
         api_calls.append(openhands_api_call_count(trace))
         metrics = trace.get("metrics", {}) or {}
-        costs.append(float(metrics.get("accumulated_cost", 0.0) or 0.0))
+        recorded_cost = metrics.get("accumulated_cost")
+        if recorded_cost is not None:
+            costs.append(float(recorded_cost))
         events = trace.get("events", []) or []
         actions = [event for event in events if event.get("kind") == "ActionEvent"]
         steps.append(len(actions))
@@ -377,10 +379,10 @@ def compute_openhands_metrics(traces_dir: str | Path, eval_path: str | Path) -> 
         "task_success_rate": success_rate,
         "accuracy": float(numeric_score) if numeric_score is not None else success_rate,
         "error_rate": len(eval_data.get("error_ids", [])) / total if total else 0.0,
-        "empty_patch_rate": 0.0,
         "repeated_command_rate": repeated_commands / total if total else 0.0,
         "missing_evidence_rate": missing_evidence / total if total else 0.0,
-        "avg_instance_cost": sum(costs) / total if total else 0.0,
+        # Partial coverage cannot establish the average cost of the full run.
+        "avg_instance_cost": sum(costs) / total if total and len(costs) == total else None,
         "avg_steps": sum(steps) / total if total else 0.0,
         "avg_api_calls": sum(api_calls) / total if total else 0.0,
     }
@@ -421,8 +423,12 @@ def evaluate_target_metrics(plan_spec: dict[str, Any], baseline: dict[str, Any],
     results = []
     improvement_signals = []
     for metric in requested_metrics:
-        baseline_value = baseline["metrics"].get(metric, 0.0)
-        current_value = current["metrics"].get(metric, 0.0)
+        if metric not in baseline["metrics"] or metric not in current["metrics"]:
+            continue
+        baseline_value = baseline["metrics"][metric]
+        current_value = current["metrics"][metric]
+        if baseline_value is None or current_value is None:
+            continue
         direction = _metric_direction(metric)
         delta = current_value - baseline_value if direction == "higher" else baseline_value - current_value
         improved = delta > 1e-9

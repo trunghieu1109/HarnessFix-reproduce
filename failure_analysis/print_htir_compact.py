@@ -33,11 +33,13 @@ def _clip(value: Any, limit: int = 900) -> Any:
 
 
 def _select_steps(steps: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if limit < 1:
+        raise ValueError("step limit must be positive")
     if len(steps) <= limit:
         return steps
     head_count = min(3, max(1, limit // 3))
-    tail_count = max(1, limit - head_count)
-    selected = steps[:head_count] + steps[-tail_count:]
+    tail_count = limit - head_count
+    selected = steps[:head_count] + (steps[-tail_count:] if tail_count else [])
     omitted = len(steps) - len(selected)
     marker = {
         "step_id": "...",
@@ -55,6 +57,8 @@ def _compact_step(step: dict[str, Any]) -> dict[str, Any]:
         "source_refs": step.get("source_refs") or step.get("source_ref"),
         "legacy_event_ids": step.get("legacy_event_ids"),
         "summary": step.get("summary"),
+        "request_message": step.get("request_message"),
+        "response_message": step.get("response_message"),
     }
     if step.get("request_summary"):
         keep["request_summary"] = step.get("request_summary")
@@ -90,6 +94,17 @@ def build_compact_bundle(bundle: dict[str, Any], step_limit: int) -> dict[str, A
         if step_id in selected_step_ids and isinstance(facet, dict)
     }
     graph = bundle.get("base_graph") or {}
+    graph_nodes = graph.get("nodes") or []
+    graph_edges = graph.get("edges") or []
+    related_edges = [edge for edge in graph_edges
+                     if edge.get("from") in selected_step_ids or edge.get("to") in selected_step_ids]
+    edge_limit = max(16, 4 * len(selected_step_ids))
+    shown_edges = related_edges[:edge_limit]
+    referenced_steps = selected_step_ids | {
+        endpoint for edge in shown_edges for endpoint in (edge.get("from"), edge.get("to")) if endpoint
+    }
+    anchor_links = graph.get("anchor_links") or []
+    shown_anchor_links = [link for link in anchor_links if link.get("from") in referenced_steps]
     return {
         "mode": bundle.get("mode"),
         "instance_id": bundle.get("instance_id"),
@@ -100,8 +115,15 @@ def build_compact_bundle(bundle: dict[str, Any], step_limit: int) -> dict[str, A
         "agent_trace_steps": [_compact_step(step) for step in selected_steps],
         "base_graph": {
             "edge_families": graph.get("edge_families"),
-            "anchor_links": graph.get("anchor_links"),
-            "step_node_count": graph.get("step_node_count"),
+            "nodes": [node for node in graph_nodes if node in referenced_steps],
+            "edges": [{key: edge[key] for key in ("from", "to", "family", "legacy_relations") if key in edge}
+                      for edge in shown_edges],
+            "boundary_step_ids": sorted(referenced_steps - selected_step_ids),
+            "anchor_links": shown_anchor_links,
+            "step_node_count": len(graph_nodes) if "nodes" in graph else graph.get("step_node_count", len(steps)),
+            "edge_count": len(graph_edges),
+            "omitted_edge_count": len(graph_edges) - len(shown_edges),
+            "omitted_anchor_link_count": len(anchor_links) - len(shown_anchor_links),
         },
         "node_facets": selected_facets,
         "views": {
@@ -117,6 +139,8 @@ def main() -> None:
     parser.add_argument("--step-limit", type=int, default=16)
     parser.add_argument("--char-limit", type=int, default=45000)
     args = parser.parse_args()
+    if args.step_limit < 1:
+        parser.error("step limit must be positive")
 
     bundle = json.loads(args.htir_path.read_text(errors="replace"))
     compact = _clip(redact_secrets(build_compact_bundle(bundle, args.step_limit)))

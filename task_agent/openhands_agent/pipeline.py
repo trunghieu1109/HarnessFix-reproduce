@@ -50,6 +50,7 @@ POLICY_DEFAULTS = {
     "min_improvement": 1, "min_target_metrics": 1,
     "max_error_rate_delta": 0.15, "max_invalid_rate_delta": 0.15,
     "max_cost_ratio": 1.25, "run_test": False,
+    "max_modify_retries": 2,
     "max_candidate_retries": 2, "candidate_check_timeout": 60,
 }
 
@@ -109,8 +110,9 @@ class OpenHandsPipeline:
         analysis_step_limit = self.policy["analysis_step_limit"]
         if analysis_step_limit is not None and (type(analysis_step_limit) is not int or analysis_step_limit < 1):
             raise ValueError("analysis_step_limit must be a positive integer")
-        if type(self.policy["max_candidate_retries"]) is not int or self.policy["max_candidate_retries"] < 0:
-            raise ValueError("max_candidate_retries must be a nonnegative integer")
+        for key in ("max_modify_retries", "max_candidate_retries"):
+            if type(self.policy[key]) is not int or self.policy[key] < 0:
+                raise ValueError(f"{key} must be a nonnegative integer")
         if type(self.policy["candidate_check_timeout"]) is not int:
             raise ValueError("candidate_check_timeout must be a positive integer")
         for key in ("agent_batch_size", "eval_batch_size"):
@@ -212,10 +214,17 @@ class OpenHandsPipeline:
         path = Path(value)
         return (path if path.is_absolute() else self.better / path).resolve()
 
-    def _candidate(self, version: int) -> Path:
+    def _modify_root(self, version: int, modify_retry: int) -> Path:
+        return self.root / "iterations" / f"v{version}" / "train_attempts" / str(modify_retry)
+
+    def _candidate(self, version: int, modify_retry: int | None = None) -> Path:
+        if modify_retry is not None:
+            return self._modify_root(version, modify_retry) / "candidate" / f"h{version}"
         return self.root / "candidates" / f"h{version}"
 
-    def _run_root(self, split: str, version: int) -> Path:
+    def _run_root(self, split: str, version: int, modify_retry: int | None = None) -> Path:
+        if modify_retry is not None:
+            return self._modify_root(version, modify_retry) / f"run_{split}"
         return self.root / "runs" / f"{split}_h{version}"
 
     def _ids(self, split: str) -> list[str]:
@@ -286,15 +295,17 @@ class OpenHandsPipeline:
             target.rename(archive)
             print(f"[pipeline] Archived interrupted candidate: {archive}", flush=True)
 
-    def _validate_candidate(self, version: int) -> None:
+    def _validate_candidate(self, version: int, modify_retry: int | None = None) -> None:
         name = "materialize_h0" if version == 0 else f"modify_v{version}"
+        if modify_retry is not None:
+            name += f"_train{modify_retry}"
         marker = json.loads((self.root / "stages" / f"{name}.json").read_text())
         if any(not Path(path).exists() or _path_digest(Path(path)) != digest
                for path, digest in marker["outputs"].items()):
             raise ValueError(f"Candidate artifacts changed after completion: h{version}")
 
-    def _validate_run(self, split: str, version: int) -> dict:
-        root = self._run_root(split, version)
+    def _validate_run(self, split: str, version: int, modify_retry: int | None = None) -> dict:
+        root = self._run_root(split, version, modify_retry)
         result = json.loads((root / "results.json").read_text())
         expected = set(self._ids(split))
         if len(result["all_ids"]) != len(expected) or set(result["all_ids"]) != expected:
@@ -316,31 +327,35 @@ class OpenHandsPipeline:
                     raise ValueError(f"Recorded trace changed: {path}")
         return result
 
-    def _execute(self, split: str, version: int) -> dict:
-        self._validate_candidate(version)
+    def _execute(self, split: str, version: int, modify_retry: int | None = None) -> dict:
+        if modify_retry is not None and split != "train":
+            raise ValueError("Only train may run before selecting a modify attempt")
+        self._validate_candidate(version, modify_retry)
         if split == "test":
             selection = json.loads((self.root / "selection.json").read_text())
             if not selection["closed_loop_complete"] or version != selection["selected_version"]:
                 raise ValueError("Test is available only for the final selected candidate")
-        root = self._run_root(split, version)
+        root = self._run_root(split, version, modify_retry)
+        suffix = f"_retry{modify_retry}" if modify_retry is not None else ""
 
         def action() -> None:
             run_better_harness(
                 better_root=self.better, base_config=self.root / "configs" / f"run_{split}.yaml",
-                candidate_dir=self._candidate(version), rollout_version=f"{self.run_id}_h{version}_{split}",
+                candidate_dir=self._candidate(version, modify_retry),
+                rollout_version=f"{self.run_id}_h{version}_{split}{suffix}",
                 normalized_output=root, success_threshold=self.config["execution"]["success_threshold"],
                 example_ids=[str(row[self.id_field]) for row in self.rows[split]],
             )
-            self._validate_run(split, version)
+            self._validate_run(split, version, modify_retry)
             evidence = set()
             for manifest_path in (root / "traces").glob("*/manifest.json"):
                 manifest = json.loads(manifest_path.read_text())
                 evidence.update(Path(manifest[key]) for key in ("trace_path", "raw_trace_path") if manifest.get(key))
             _write_json(root / "trace_checksums.json", {str(path): _path_digest(path) for path in sorted(evidence)})
 
-        self._stage(f"{split}_h{version}", [root / "results.json", root / "traces", root / "manifest_index.json",
+        self._stage(f"{split}_h{version}{suffix}", [root / "results.json", root / "traces", root / "manifest_index.json",
                     root / "trace_checksums.json"], action)
-        return self._validate_run(split, version)
+        return self._validate_run(split, version, modify_retry)
 
     def _analysis(self, split: str, version: int, expected: list[str], *, iteration: int) -> Path:
         name = f"{self.run_id}_{split}_h{version}_v{iteration}_analysis"
@@ -375,19 +390,23 @@ class OpenHandsPipeline:
         self._stage(name, [output, ids_path], action)
         return output
 
-    def _comparison(self, split: str, base: int, candidate: int, spec: Path) -> dict:
+    def _comparison(self, split: str, base: int, candidate: int, spec: Path,
+                    modify_retry: int | None = None) -> dict:
         return compare_runs(
             mode="openhands", split=split, ids_file=self.root / "data" / f"{split}_ids.txt",
             baseline_eval=self._run_root(split, base) / "results.json",
-            current_eval=self._run_root(split, candidate) / "results.json",
+            current_eval=self._run_root(split, candidate, modify_retry) / "results.json",
             baseline_traces=self._run_root(split, base) / "traces",
-            current_traces=self._run_root(split, candidate) / "traces",
+            current_traces=self._run_root(split, candidate, modify_retry) / "traces",
             spec_path=spec, max_cost_ratio=self.policy["max_cost_ratio"],
-        ) | {"reported_only": split == "train"}
+        ) | {"reported_only": split == "train" and modify_retry is None,
+             "used_for_modify_retry": split == "train" and modify_retry is not None}
 
-    def _prepare_candidate(self, version: int, base: int, plan: Path, spec: Path) -> None:
+    def _prepare_candidate(self, version: int, base: int, plan: Path, spec: Path, *,
+                           modify_retry: int, train_feedback: Path | None) -> None:
         """Retry generation with identical inputs on import/build failure."""
-        directory = plan.parent
+        directory = self._modify_root(version, modify_retry)
+        prefix = f"modify_v{version}_train{modify_retry}"
         history = []
         target = self._candidate(version)
         for attempt in range(self.policy["max_candidate_retries"] + 1):
@@ -403,13 +422,15 @@ class OpenHandsPipeline:
                            "--reference-dir", str(self.reference_dir), "--model", self.config["models"]["analysis"],
                            "--base-dir", str(self._candidate(base)), "--target-dir", str(target),
                            "--plan", str(plan), "--spec", str(spec), "--trajectory-output", str(trajectory)]
+                if train_feedback is not None:
+                    command += ["--train-compare", str(train_feedback)]
                 _invoke(command)
                 target.rename(archived_candidate)
 
-            self._stage(f"modify_v{version}_attempt{attempt}", [archived_candidate, trajectory], modify)
+            self._stage(f"{prefix}_attempt{attempt}", [archived_candidate, trajectory], modify)
             self._validate_candidate(base)
             audit_path = attempt_dir / "audit.json"
-            self._stage(f"audit_v{version}_attempt{attempt}", [audit_path], lambda: _invoke([
+            self._stage(f"audit_v{version}_train{modify_retry}_attempt{attempt}", [audit_path], lambda: _invoke([
                 sys.executable, "-B", str(REPO_ROOT / "failure_analysis/plan_diff_audit.py"), "--mode", "openhands",
                 "--original-dir", str(self._candidate(base)), "--candidate-dir", str(archived_candidate),
                 "--spec", str(spec), "--output", str(audit_path),
@@ -421,7 +442,7 @@ class OpenHandsPipeline:
                 history.append(entry)
                 break  # Audit rejection retains the existing outer-loop policy.
             check_path = attempt_dir / "candidate_check.json"
-            self._stage(f"check_v{version}_attempt{attempt}", [check_path], lambda: check_candidate(
+            self._stage(f"check_v{version}_train{modify_retry}_attempt{attempt}", [check_path], lambda: check_candidate(
                 better_root=self.better, candidate_dir=archived_candidate, output_path=check_path,
                 timeout=self.policy["candidate_check_timeout"], model_settings=self.model_settings["task"],
             ))
@@ -434,12 +455,39 @@ class OpenHandsPipeline:
                 print(f"[pipeline] h{version}: candidate initialization failed; retrying generation "
                       f"with the same context ({attempt + 1}/{self.policy['max_candidate_retries']})", flush=True)
         self._archive_partial_candidate(self._candidate(version))
-        shutil.copytree(archived_candidate, self._candidate(version))
+        prepared = self._candidate(version, modify_retry)
+        self._archive_partial_candidate(prepared)
+        shutil.copytree(archived_candidate, prepared)
         shutil.copyfile(trajectory, directory / "modify.traj.json")
         _write_json(directory / "candidate_checks.json", {
             "attempts": history, "final_attempt": attempt, "audit_path": str(audit_path.relative_to(self.root)),
             "passed": bool(audit["passed"] and history[-1].get("check", {}).get("passed")),
         })
+
+    def _publish_train_attempt(self, version: int, modify_retry: int, *, include_train: bool) -> None:
+        """Publish the selected attempt without changing completed attempt artifacts."""
+        directory = self.root / "iterations" / f"v{version}"
+        attempt_dir = self._modify_root(version, modify_retry)
+
+        def publish() -> None:
+            target = self._candidate(version)
+            self._archive_partial_candidate(target)
+            shutil.copytree(self._candidate(version, modify_retry), target)
+            for name in ("modify.traj.json", "candidate_checks.json"):
+                shutil.copyfile(attempt_dir / name, directory / name)
+
+        self._stage(f"modify_v{version}", [self._candidate(version), directory / "modify.traj.json",
+                                          directory / "candidate_checks.json"], publish)
+        if include_train:
+            root = self._run_root("train", version)
+
+            def publish_train() -> None:
+                self._archive_partial_candidate(root)
+                shutil.copytree(self._run_root("train", version, modify_retry), root)
+                self._validate_run("train", version)
+
+            self._stage(f"train_h{version}", [root / "results.json", root / "traces",
+                                              root / "manifest_index.json", root / "trace_checksums.json"], publish_train)
 
     @staticmethod
     def _candidate_diff(before_root: Path, after_root: Path, changed_files: list[str]) -> dict:
@@ -469,20 +517,52 @@ class OpenHandsPipeline:
             command += ["--val-analyses", str(val_analyses)]
         self._stage(f"aggregate_v{version}", [plan, spec], lambda: _invoke(command))
 
-        checks_path = directory / "candidate_checks.json"
-        self._stage(f"modify_v{version}", [self._candidate(version), directory / "modify.traj.json", checks_path],
-                    lambda: self._prepare_candidate(version, base, plan, spec))
+        train_feedback = None
+        train_attempts = []
+        train_compare, val_compare = {}, {}
+        for modify_retry in range(self.policy["max_modify_retries"] + 1):
+            attempt_dir = self._modify_root(version, modify_retry)
+            checks_path = attempt_dir / "candidate_checks.json"
+            self._stage(f"modify_v{version}_train{modify_retry}",
+                        [self._candidate(version, modify_retry), attempt_dir / "modify.traj.json", checks_path],
+                        lambda: self._prepare_candidate(version, base, plan, spec,
+                                                        modify_retry=modify_retry, train_feedback=train_feedback))
+            checks = json.loads(checks_path.read_text())
+            audit = json.loads((self.root / checks["audit_path"]).read_text())
+            entry = {"modify_retry": modify_retry, "candidate": str(self._candidate(version, modify_retry)),
+                     "checks_path": str(checks_path), "train_feedback": str(train_feedback) if train_feedback else None}
+            if not audit["passed"] or not checks["passed"]:
+                train_compare = {}
+                train_attempts.append(entry)
+                break
+
+            self._execute("train", version, modify_retry)
+            comparison_path = attempt_dir / "train_compare.json"
+            self._stage(f"train_compare_v{version}_retry{modify_retry}", [comparison_path], lambda: _write_json(
+                comparison_path, self._comparison("train", base, version, spec, modify_retry)))
+            train_compare = json.loads(comparison_path.read_text())
+            entry.update(train_compare_path=str(comparison_path), net_change=train_compare["net_change"])
+            train_attempts.append(entry)
+            if train_compare["net_change"] > 0:
+                break
+            if modify_retry < self.policy["max_modify_retries"]:
+                train_feedback = comparison_path
+                print(f"[pipeline] h{version}: train did not improve; retrying modify with train feedback "
+                      f"({modify_retry + 1}/{self.policy['max_modify_retries']})", flush=True)
+            else:
+                print(f"[pipeline] h{version}: train did not improve after {modify_retry + 1} attempts; "
+                      "proceeding to validation with the last candidate", flush=True)
+
+        self._publish_train_attempt(version, modify_retry, include_train=bool(train_compare))
         self._validate_candidate(base)
+        checks_path = directory / "candidate_checks.json"
         checks = json.loads(checks_path.read_text())
         audit_path = directory / "audit.json"
         self._stage(f"audit_v{version}", [audit_path], lambda: _write_json(
             audit_path, json.loads((self.root / checks["audit_path"]).read_text())))
         audit = json.loads(audit_path.read_text())
-        train_compare, val_compare = {}, {}
         if audit["passed"] and checks["passed"]:
-            self._execute("train", version)
             self._execute("val", version)
-            train_compare = self._comparison("train", base, version, spec)
             val_compare = self._comparison("val", base, version, spec)
             promotion = decide_promotion(audit, train_compare, val_compare, **{
                 key: self.policy[key] for key in ("min_improvement", "min_target_metrics",
@@ -509,7 +589,8 @@ class OpenHandsPipeline:
                 "version": version, "base_version": base, "candidate_dir": str(self._candidate(version)),
                 "base_dir": str(self._candidate(base)), "plan_path": str(plan), "plan_spec_path": str(spec),
                 "train_analysis_path": str(analysis), "plan_summary": json.loads(spec.read_text()),
-                "audit": audit, "candidate_checks": checks,
+                "audit": audit, "candidate_checks": checks, "train_attempts": train_attempts,
+                "selected_modify_retry": modify_retry,
                 "changed_files": audit["changed_files"], "diff_summary": diffs,
                 "train_compare": train_compare, "val_compare": val_compare, "promotion": promotion,
                 "next_iteration_guidance": guidance,
@@ -542,7 +623,7 @@ class OpenHandsPipeline:
                                    "range": self.config["splits"][split]} for split, rows in self.rows.items()},
                 "execution": self.config["execution"], "pipeline": self.policy,
                 "stages": ["materialize H0", "baseline val", "current-base train", "failed train analysis",
-                           "aggregate with previous report/regressions/memory", "modify", "audit",
+                           "aggregate with previous report/regressions/memory", "modify with train-feedback retries", "audit",
                            "candidate import/build check + bounded generation retry with unchanged context",
                            "candidate train + val", "train/val comparison", "promotion", "iteration report + memory",
                            "val regression analysis", "repeat", "select best on val", "held-out test after selection"],

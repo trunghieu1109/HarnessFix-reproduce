@@ -24,6 +24,7 @@ from scripts.resume_frozen_openhands import (
 )
 from scripts.resume_openhands_planner_update import AGGREGATE_RELATIVE, prepare_resume, record_resume
 from task_agent.openhands_agent import pipeline
+from tests.diagnosis_fixtures import valid_diagnosis
 
 
 class OpenHandsPipelineTests(unittest.TestCase):
@@ -119,6 +120,8 @@ class OpenHandsPipelineTests(unittest.TestCase):
 
     def collect_evaluate(self, **kwargs) -> None:
         version = int(kwargs["candidate_dir"].name[1:])
+        parts = kwargs["candidate_dir"].parts
+        modify_retry = int(parts[parts.index("train_attempts") + 1]) if "train_attempts" in parts else None
         config = yaml.safe_load(kwargs["base_config"].read_text())
         split = kwargs["base_config"].stem.removeprefix("run_")
         self.calls.append((split, version))
@@ -137,21 +140,22 @@ class OpenHandsPipelineTests(unittest.TestCase):
         for index, row in enumerate(rows):
             self.assertEqual(row["seed"], int(row["id"].split("_")[1]))
             for rollout in range(config["n_responses"]):
-                workspace = self.better / "runs" / f"{split}_h{version}" / f"example{index}_rollout{rollout}"
+                workspace = self.better / "runs" / kwargs["rollout_version"] / f"example{index}_rollout{rollout}"
                 workspace.mkdir(parents=True, exist_ok=True)
                 log_dir = workspace.parent / f"{workspace.name}_logs"
                 log_dir.mkdir(exist_ok=True)
                 events = [{"kind": "ActionEvent", "tool_name": "finish", "action": {"kind": "FinishAction"}}]
                 (log_dir / "trace_fixture.json").write_text(json.dumps({"events": events, "metrics": {"accumulated_cost": 0.1}}))
                 (log_dir / "raw_trace_fixture.json").write_text(json.dumps(events))
-                score = float(index * config["n_responses"] + rollout in
-                              self.scores.get((split, version), set(range(len(rows) * config["n_responses"]))))
+                solved = self.scores.get((split, version, modify_retry),
+                                         self.scores.get((split, version), set(range(len(rows) * config["n_responses"]))))
+                score = float(index * config["n_responses"] + rollout in solved)
                 if self.unsupported_eval and split == "train":
                     score = None
                 eval_rows.append({"workspace_dir": str(workspace), "score": score, "feedback": "Fixture evaluation."})
         if self.missing_eval and split == "train":
             eval_rows.pop()
-        eval_path = self.better / f"eval_{split}_h{version}.yaml"
+        eval_path = self.better / f"eval_{kwargs['rollout_version']}.yaml"
         eval_path.write_text(yaml.safe_dump(eval_rows))
         normalize_rollout(eval_results_path=eval_path, better_root=self.better, output_dir=kwargs["normalized_output"],
                           task_id=self.task, example_ids=kwargs["example_ids"])
@@ -164,8 +168,8 @@ class OpenHandsPipelineTests(unittest.TestCase):
             ids = arg("--instance-ids-file").read_text().split()
             output = arg("--output-file")
             output.parent.mkdir(parents=True, exist_ok=True)
-            records = [{"instance_id": value, "failure_category": "unresolved",
-                        "agent_source_dir": str(arg("--agent-source-dir")), "_analysis_fallback": self.analysis_fallback} for value in ids]
+            records = [valid_diagnosis(value, agent_source_dir=str(arg("--agent-source-dir")),
+                                       _analysis_fallback=self.analysis_fallback) for value in ids]
             output.write_text("".join(json.dumps(record) + "\n" for record in records))
         elif "aggregate" in command:
             arg("--output").write_text("General repair plan.\n")
@@ -174,7 +178,9 @@ class OpenHandsPipelineTests(unittest.TestCase):
         elif "modify" in command:
             shutil.copytree(arg("--base-dir"), arg("--target-dir"))
             prompt = arg("--target-dir") / "prompts/system.md"
-            prompt.write_text(prompt.read_text() + f"Fix {arg('--target-dir').name}.\n")
+            parts = arg("--trajectory-output").parts
+            modify_retry = parts[parts.index("train_attempts") + 1] if "train_attempts" in parts else "0"
+            prompt.write_text(prompt.read_text() + f"Fix {arg('--target-dir').name}.\nTrain attempt {modify_retry}.\n")
             arg("--trajectory-output").write_text("{}")
         else:
             version = int(arg("--candidate-dir").name[1:])
@@ -259,7 +265,8 @@ class OpenHandsPipelineTests(unittest.TestCase):
         self.assertFalse((self.run_dir / "candidates/h0/skills").exists())
         report = json.loads((self.run_dir / "iterations/v2/iteration_report.json").read_text())
         self.assertEqual(report["base_version"], 1)
-        self.assertTrue(report["train_compare"]["reported_only"])
+        self.assertFalse(report["train_compare"]["reported_only"])
+        self.assertTrue(report["train_compare"]["used_for_modify_retry"])
 
     def test_technical_references_cannot_change_on_resume_but_strategy_guide_is_excluded(self) -> None:
         self.run_quietly()
@@ -300,6 +307,127 @@ class OpenHandsPipelineTests(unittest.TestCase):
         modifies = [command for command in self.commands if "modify" in command]
         self.assertEqual(Path(modifies[1][modifies[1].index("--base-dir") + 1]).name, "h0")
         self.assertEqual(self.calls[-1], ("test", 2))
+
+    def test_train_feedback_retries_from_same_base_and_reuses_plan(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["pipeline"].update(max_iterations=1, run_test=False)
+        self.scores[("train", 1, 0)] = set()
+        self.scores[("train", 1, 1)] = {0, 1}
+        summary = self.run_quietly(self.experiment(config))
+        modifies = [command for command in self.commands if "modify" in command]
+        self.assertEqual(len(modifies), 2)
+        self.assertEqual(len([command for command in self.commands if "aggregate" in command]), 1)
+        self.assertNotIn("--train-compare", modifies[0])
+        feedback = Path(modifies[1][modifies[1].index("--train-compare") + 1])
+        previous = json.loads(feedback.read_text())
+        self.assertEqual(previous["net_change"], -1)
+        self.assertTrue(previous["regressed_ids"])
+        for flag in ("--base-dir", "--target-dir", "--plan", "--spec"):
+            self.assertEqual(modifies[0][modifies[0].index(flag) + 1], modifies[1][modifies[1].index(flag) + 1])
+        prompt = (self.run_dir / "candidates/h1/prompts/system.md").read_text()
+        self.assertEqual(prompt.count("Fix h1"), 1)
+        self.assertIn("Train attempt 1", prompt)
+        self.assertNotIn("Train attempt 0", prompt)
+        self.assertEqual(summary["selected_version"], 1)
+        self.assertEqual(self.calls, [("val", 0), ("train", 0), ("train", 1), ("train", 1), ("val", 1)])
+        report = json.loads((self.run_dir / "iterations/v1/iteration_report.json").read_text())
+        self.assertEqual(report["selected_modify_retry"], 1)
+        self.assertEqual([attempt["net_change"] for attempt in report["train_attempts"]], [-1, 1])
+        first = self.run_dir / "iterations/v1/train_attempts/0/run_train/trace_checksums.json"
+        second = self.run_dir / "iterations/v1/train_attempts/1/run_train/trace_checksums.json"
+        self.assertTrue(set(json.loads(first.read_text())).isdisjoint(json.loads(second.read_text())))
+        self.assertGreater(verify_completed_stages(pipeline, self.run_dir), 0)
+        counts = len(self.calls), len(self.commands)
+        self.assertEqual(self.run_quietly(self.experiment(config)), summary)
+        self.assertEqual((len(self.calls), len(self.commands)), counts)
+
+    def test_exhausted_train_retries_validate_last_candidate_even_if_train_worsens(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["pipeline"].update(max_iterations=1, run_test=False)
+        self.scores[("train", 1, 0)] = {0}
+        self.scores[("train", 1, 1)] = set()
+        self.scores[("train", 1, 2)] = set()
+        summary = self.run_quietly(self.experiment(config))
+        self.assertEqual(len([command for command in self.commands if "modify" in command]), 3)
+        self.assertEqual(len([command for command in self.commands if "aggregate" in command]), 1)
+        self.assertEqual(self.calls.count(("train", 1)), 3)
+        self.assertEqual(self.calls.count(("val", 1)), 1)
+        self.assertEqual(summary["promoted_versions"], [1])
+        prompt = (self.run_dir / "candidates/h1/prompts/system.md").read_text()
+        self.assertIn("Train attempt 2", prompt)
+        self.assertNotIn("Train attempt 0", prompt)
+        report = json.loads((self.run_dir / "iterations/v1/iteration_report.json").read_text())
+        self.assertEqual(report["selected_modify_retry"], 2)
+        self.assertEqual(report["train_compare"]["net_change"], -1)
+        self.assertGreater(verify_completed_stages(pipeline, self.run_dir), 0)
+
+    def test_modify_retry_limit_validates_and_zero_proceeds_to_validation(self) -> None:
+        for invalid in (-1, True, 1.5):
+            config = copy.deepcopy(self.config)
+            config["pipeline"]["max_modify_retries"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "max_modify_retries"):
+                self.experiment(config)
+        config = copy.deepcopy(self.config)
+        config["pipeline"].update(max_modify_retries=0, max_iterations=1, run_test=False)
+        self.scores[("train", 1, 0)] = set()
+        summary = self.run_quietly(self.experiment(config))
+        self.assertEqual(len([command for command in self.commands if "modify" in command]), 1)
+        self.assertEqual(self.calls.count(("val", 1)), 1)
+        self.assertEqual(summary["selected_version"], 1)
+
+    def test_initialization_retries_preserve_current_train_feedback(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["pipeline"].update(max_iterations=1, run_test=False)
+        self.scores[("train", 1, 0)] = set()
+        self.scores[("train", 1, 1)] = {0, 1}
+
+        def check(**kwargs):
+            parts = kwargs["candidate_dir"].parts
+            retry = parts[parts.index("train_attempts") + 1]
+            passed = retry != "1" or kwargs["candidate_dir"].parent.name != "0"
+            report = {"passed": passed, "status": "complete", "stage": "build_agent", "llm_calls": 0}
+            kwargs["output_path"].write_text(json.dumps(report))
+            return report
+
+        with patch.object(pipeline, "check_candidate", side_effect=check):
+            self.run_quietly(self.experiment(config))
+        modifies = [command for command in self.commands if "modify" in command]
+        self.assertEqual(len(modifies), 3)
+        self.assertNotIn("--train-compare", modifies[0])
+        contexts = []
+        for command in modifies[1:]:
+            self.assertIn("--train-compare", command)
+            context = list(command)
+            del context[context.index("--trajectory-output"):context.index("--trajectory-output") + 2]
+            contexts.append(context)
+        self.assertEqual(contexts[0], contexts[1])
+        self.assertEqual(self.calls.count(("train", 1)), 2)
+
+    def test_resume_train_retry_preserves_completed_train_and_feedback(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["pipeline"].update(max_iterations=1, run_test=False)
+        self.scores[("train", 1, 0)] = set()
+        self.scores[("train", 1, 1)] = {0, 1}
+        interrupted = False
+
+        def invoke(command, accepted_codes=(0,)):
+            nonlocal interrupted
+            self.invoke(command, accepted_codes)
+            if "modify" in command and "--train-compare" in command and not interrupted:
+                interrupted = True
+                raise RuntimeError("Interrupted train retry")
+
+        with patch.object(pipeline, "_invoke", side_effect=invoke):
+            with self.assertRaisesRegex(RuntimeError, "Interrupted train retry"):
+                self.run_quietly(self.experiment(config))
+        feedback = self.run_dir / "iterations/v1/train_attempts/0/train_compare.json"
+        previous = feedback.read_bytes()
+        self.run_quietly(self.experiment(config))
+        self.assertEqual(feedback.read_bytes(), previous)
+        self.assertEqual(self.calls.count(("train", 0)), 1)
+        self.assertEqual(self.calls.count(("train", 1)), 2)
+        self.assertEqual(len([command for command in self.commands if "aggregate" in command]), 1)
+        self.assertGreater(verify_completed_stages(pipeline, self.run_dir), 0)
 
     def test_initialization_failure_retries_same_generation_context_without_feedback(self) -> None:
         config = copy.deepcopy(self.config)
@@ -408,7 +536,7 @@ class OpenHandsPipelineTests(unittest.TestCase):
             with patch.object(pipeline, "_invoke", side_effect=invoke):
                 with self.assertRaisesRegex(RuntimeError, "Interrupted during regeneration"):
                     self.run_quietly(self.experiment(config))
-            first_check = self.run_dir / "iterations/v1/attempts/0/candidate_check.json"
+            first_check = self.run_dir / "iterations/v1/train_attempts/0/attempts/0/candidate_check.json"
             previous = first_check.read_bytes()
             self.assertTrue((self.run_dir / "candidates/h1").exists())
             self.run_quietly(self.experiment(config))
@@ -424,14 +552,14 @@ class OpenHandsPipelineTests(unittest.TestCase):
         write_json = pipeline._write_json
 
         def interrupted(path, value):
-            if path.name == "modify_v1_attempt0.json":
+            if path.name == "modify_v1_train0_attempt0.json":
                 raise RuntimeError("Interrupted before completion marker")
             write_json(path, value)
 
         with patch.object(pipeline, "_write_json", side_effect=interrupted):
             with self.assertRaisesRegex(RuntimeError, "Interrupted before completion marker"):
                 self.run_quietly(self.experiment(config))
-        self.assertTrue((self.run_dir / "iterations/v1/attempts/0/h1").exists())
+        self.assertTrue((self.run_dir / "iterations/v1/train_attempts/0/attempts/0/h1").exists())
         self.assertFalse((self.run_dir / "candidates/h1").exists())
         self.run_quietly(self.experiment(config))
         self.assertEqual(len(list((self.run_dir / "incomplete_candidates").iterdir())), 1)
@@ -811,6 +939,26 @@ class OpenHandsStageCLITests(unittest.TestCase):
 
 
 class SharedPromotionTests(unittest.TestCase):
+    def test_missing_rate_metrics_are_skipped_without_zero_values(self) -> None:
+        val = {"net_change": 1, "target_metric_results": {"improved_metric_count": 1},
+               "baseline_metrics": {"metrics": {"error_rate": 0.0}},
+               "current_metrics": {"metrics": {"error_rate": 0.1}}}
+        result = decide_promotion({"passed": True}, {}, val)
+        self.assertTrue(result["promoted"])
+        self.assertIsNone(result["invalid_submission_rate_delta"])
+        self.assertNotIn("invalid_delta_within_limit", result["checks"])
+        self.assertIn("invalid_delta_within_limit", result["skipped_checks"])
+        self.assertAlmostEqual(result["error_rate_delta"], 0.1)
+
+    def test_recorded_zero_rates_still_enforce_promotion_limits(self) -> None:
+        val = {"net_change": 1, "target_metric_results": {"improved_metric_count": 1},
+               "baseline_metrics": {"metrics": {"error_rate": 0.0, "invalid_submission_rate": 0.0}},
+               "current_metrics": {"metrics": {"error_rate": 0.0, "invalid_submission_rate": 0.2}}}
+        result = decide_promotion({"passed": True}, {}, val)
+        self.assertFalse(result["promoted"])
+        self.assertIn("invalid_delta_within_limit", result["failure_reasons"])
+        self.assertEqual(result["skipped_checks"], [])
+
     def test_swe_and_openhands_share_exact_promotion_result(self) -> None:
         import run_pipeline_swe as swe
 

@@ -62,7 +62,7 @@
     "max_output_tokens": 8192,
     "litellm_provider": "openai",
     "mode": "chat",
-    "api_base": "QWEN_BASE_URL",
+    "api_base": "https://hieucolab8000.iselab.site/v1",
     "api_key_env": "QWEN_API_KEY",
     "config_name": "swebench_xml.yaml",
     "model_class": "litellm_textbased",
@@ -73,7 +73,7 @@
       "timeout": 300,
       "max_retries": 0,
       "drop_params": true,
-      "api_base": "QWEN_BASE_URL",
+      "api_base": "https://hieucolab8000.iselab.site/v1",
       "extra_body": {
         "chat_template_kwargs": {
           "enable_thinking": false
@@ -105,13 +105,13 @@
     },
     "cost_tracking": "ignore_errors"
   },
-  "openai/ag/gemini-3.1-pro-low": {
+  "openai/ag/gemini-3.8-flash-low": {
     "max_tokens": 258192,
     "max_input_tokens": 250000,
     "max_output_tokens": 8192,
     "litellm_provider": "openai",
     "mode": "chat",
-    "api_base": "GEMINI_BASE_URL",
+    "api_base": "https://model.iselab.site/v1",
     "api_key_env": "GEMINI_API_KEY",
     "config_name": "swebench_xml.yaml",
     "model_class": "litellm_textbased",
@@ -122,7 +122,7 @@
       "timeout": 300,
       "max_retries": 0,
       "drop_params": true,
-      "api_base": "GEMINI_BASE_URL",
+      "api_base": "https://model.iselab.site/v1",
       "reasoning_effort": "low"
     },
     "cost_tracking": "ignore_errors",

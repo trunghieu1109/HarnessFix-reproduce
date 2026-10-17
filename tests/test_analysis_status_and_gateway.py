@@ -15,6 +15,7 @@ import yaml
 from dotenv import dotenv_values
 
 from failure_analysis.analysis_records import analysis_record_succeeded
+from tests.diagnosis_fixtures import valid_diagnosis
 from scripts.configure_models import configure
 import run_pipeline_swe as swe_pipeline
 
@@ -117,7 +118,7 @@ class AnalysisExecutionTests(unittest.TestCase):
 
     def test_cli_step_limit_overrides_both_agent_and_top_level_config(self):
         config = {"step_limit": 30, "agent": {"step_limit": 30}}
-        record = {"instance_id": "one", "agent_design_issue": "Inspect verification."}
+        record = valid_diagnosis("one")
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch.object(sys, "argv", [
@@ -139,10 +140,12 @@ class AnalysisExecutionTests(unittest.TestCase):
 
     def test_failed_records_are_retryable_and_excluded_from_aggregate(self):
         rows = [
-            {"instance_id": "valid", "agent_design_issue": "Inspect verification."},
+            valid_diagnosis("valid"),
             {"instance_id": "api-failed", "_analysis_fallback": True, "exit_status": "analysis_agent_exception"},
             {"instance_id": "parse-failed", "_parse_error": True},
             {"instance_id": "legacy-failed", "exit_status": "analysis_failed"},
+            {"instance_id": "incomplete", "agent_design_issue": "Inspect verification."},
+            valid_diagnosis("invalid-reference", _analysis_validation_errors=["Invalid step ID"]),
         ]
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "results.jsonl"

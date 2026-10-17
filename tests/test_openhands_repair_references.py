@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 import yaml
 
+from tests.diagnosis_fixtures import valid_diagnosis
+
 from task_agent.openhands_agent.repair_references import (
     REFERENCE_DEFAULTS, REFERENCE_ENV, reference_options, stage_references, technical_reference_prompt, validate_references,
 )
@@ -115,7 +117,7 @@ class RepairReferenceTests(unittest.TestCase):
     def test_analysis_receives_technical_inputs_in_real_rendered_request(self):
         from failure_analysis import run_analysis as analysis
 
-        model = RecordingModel(json.dumps({"failure_reason": "Synthetic schema mismatch"}))
+        model = RecordingModel(json.dumps(valid_diagnosis("synthetic", failure_reason="Synthetic schema mismatch")))
         paths = {"traj_path": str(self.root / "trace.json"), "raw_traj_path": str(self.root / "raw.json"),
                  "manifest_path": str(self.root / "manifest.json"), "output_path": str(self.root / "analysis.traj.json")}
         config = yaml.safe_load((REPO_ROOT / "failure_analysis/analysis_config_openhands.yaml").read_text())
@@ -195,6 +197,43 @@ class RepairReferenceTests(unittest.TestCase):
             (self.root / "h1").rename(self.root / f"attempt_{attempt}")
         self.assertEqual(contexts[0], contexts[1])
         self.assertNotIn("synthetic-previous-failure", str(contexts[1]))
+
+    def test_modifier_reads_train_feedback_with_150_call_budget(self):
+        import run_pipeline_openhands as driver
+        from minisweagent.models import litellm_textbased_model
+
+        class FeedbackModel(RecordingModel):
+            def query(self, messages):
+                if not self.requests:
+                    self.requests.append(copy.deepcopy(messages))
+                    return {"role": "assistant", "content": "Read train feedback.", "extra": {
+                        "actions": [{"command": 'cat "$TRAIN_COMPARE_PATH"'}],
+                    }}
+                return super().query(messages)
+
+            def format_observation_messages(self, message, outputs, template_vars):
+                return [{"role": "user", "content": outputs[0]["output"]}]
+
+        original = self.root / "h0"
+        original.mkdir()
+        (original / "agent.py").write_text("def build_agent(base_dir, llm): return llm\n")
+        feedback = self.root / "train_compare.json"
+        feedback.write_text(json.dumps({"net_change": -1, "regressed_ids": ["train-task"], "improved_ids": []}))
+        trajectory = self.root / "modify.traj.json"
+        model = FeedbackModel("Completed synthetic edit")
+        with patch.object(litellm_textbased_model, "LitellmTextbasedModel", return_value=model), \
+                patch.object(driver, "selected_model_kwargs", return_value={}):
+            driver._modify_candidate(base_dir=original, target_dir=self.root / "h1", plan_path=self.root / "plan.md",
+                                     spec_path=self.root / "plan.json", model_name="offline", redo_feedback=feedback,
+                                     trajectory_output=trajectory)
+        self.assertEqual(len(model.requests), 2)
+        observed = json.loads(model.requests[1][-1]["content"])
+        self.assertEqual(observed["net_change"], -1)
+        self.assertEqual(observed["regressed_ids"], ["train-task"])
+        agent_config = json.loads(trajectory.read_text())["info"]["config"]["agent"]
+        self.assertEqual(agent_config["step_limit"], 150)
+        self.assertEqual(agent_config["cost_limit"], 5)
+        self.assertNotIn("fix scope", str(model.requests[0]))
 
 
 if __name__ == "__main__":

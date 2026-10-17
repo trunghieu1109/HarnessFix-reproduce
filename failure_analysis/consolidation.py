@@ -5,8 +5,10 @@ import json
 from collections import Counter, defaultdict
 from typing import Any
 
+from failure_analysis.plan_diff_audit import _path_allowed
 from failure_analysis.operator_registry import (
     SEVERITY_ORDER,
+    filter_target_metrics,
     infer_defect_class,
     infer_severity,
     load_operator_registry,
@@ -191,7 +193,7 @@ def consolidate_diagnoses(results: list[dict[str, Any]], mode: str, min_frequenc
                 "representative_instances": [item.get("instance_id") for item in representative],
                 "root_cause_hypothesis": representative[0].get("agent_design_issue", "") if representative else "",
                 "evidence_patterns": evidence_patterns,
-                "target_metrics": _registry_union(registry, operator_families, "target_metrics"),
+                "target_metrics": filter_target_metrics(mode, _registry_union(registry, operator_families, "target_metrics")),
                 "regression_risks": _registry_union(registry, operator_families, "regression_risks"),
                 "static_checks": _registry_union(registry, operator_families, "static_checks"),
                 "rollback_conditions": _registry_union(registry, operator_families, "rollback_conditions"),
@@ -279,19 +281,14 @@ def _fix_context_record(fix: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _ordered_intersection(first: list[str], second: list[str]) -> list[str]:
-    second_set = set(second)
-    return [item for item in first if item in second_set]
-
-
 def _fix_active_files(fix: dict[str, Any], allowed_paths: list[str]) -> list[str]:
     target_files = [str(path) for path in fix.get("target_files", []) if path]
-    active = _ordered_intersection(target_files, allowed_paths)
+    active = [path for path in target_files if _path_allowed(path, allowed_paths)
+              and not path.endswith(("/**", "/..."))]
     if active:
         return active
-    # Fall back to operator-allowed paths so the modify agent inspects the real
-    # active surface before deciding whether target_files need adjustment.
-    return list(allowed_paths)
+    # Keep concrete fallback paths; scope patterns are not inspection files.
+    return [path for path in allowed_paths if not path.endswith(("/**", "/..."))]
 
 
 def _merge_ordered(existing: Any, additions: list[str]) -> list[str]:
@@ -340,6 +337,7 @@ def enrich_spec_with_clusters(spec: dict[str, Any], clusters: list[dict[str, Any
         fix["operator_family"] = operator_family
         operator = registry[operator_family]
         fix.setdefault("target_metrics", list(operator["target_metrics"]))
+        fix["target_metrics"] = filter_target_metrics(mode, fix["target_metrics"])
         fix.setdefault("static_checks", list(operator["static_checks"]))
         fix.setdefault("rollback_conditions", list(operator["rollback_conditions"]))
         fix.setdefault("regression_risks", list(operator["regression_risks"]))
@@ -348,7 +346,8 @@ def enrich_spec_with_clusters(spec: dict[str, Any], clusters: list[dict[str, Any
         fix["active_files"] = _merge_ordered(fix.get("active_files"), active_files)
         fix["must_inspect_files"] = _merge_ordered(
             fix.get("must_inspect_files"),
-            fix["active_files"] + [path for path in allowed if path not in fix["active_files"]],
+            fix["active_files"] + [path for path in allowed
+                                   if path not in fix["active_files"] and not path.endswith(("/**", "/..."))],
         )
         fix.setdefault("do_not_edit_until_inspected", True)
         for path in allowed:

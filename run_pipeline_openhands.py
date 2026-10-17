@@ -74,6 +74,7 @@ def _modify_candidate(
         "PLAN_PATH": str(plan_path.resolve()),
         "PLAN_JSON_PATH": str(spec_path.resolve()),
         "REDO_FEEDBACK_PATH": str(redo_feedback.resolve()) if redo_feedback else "",
+        "TRAIN_COMPARE_PATH": str(redo_feedback.resolve()) if redo_feedback else "",
     }
     agent = PromptSafeAgent(
         model,
@@ -133,7 +134,8 @@ def main() -> None:
     modify.add_argument("--spec", type=Path, required=True)
     modify.add_argument("--model", required=True)
     modify.add_argument("--better-root", type=Path, required=True)
-    modify.add_argument("--redo-feedback", type=Path)
+    modify.add_argument("--redo-feedback", "--train-compare", dest="redo_feedback", type=Path,
+                        help="Train comparison from the previous modify attempt")
     modify.add_argument("--trajectory-output", type=Path)
 
     for stage_parser in (analyze, aggregate, modify):
@@ -153,6 +155,11 @@ def main() -> None:
     gate.add_argument("--current-eval", type=Path, required=True)
     gate.add_argument("--ids-file", type=Path, required=True)
     gate.add_argument("--plan-spec", type=Path, required=True)
+    gate.add_argument("--audit", type=Path, required=True, help="Candidate audit JSON from the audit stage")
+    gate.add_argument("--min-improvement", type=int, default=1)
+    gate.add_argument("--min-target-metrics", type=int, default=1)
+    gate.add_argument("--max-error-rate-delta", type=float, default=0.15)
+    gate.add_argument("--max-invalid-rate-delta", type=float, default=0.15)
     gate.add_argument("--output", type=Path, required=True)
 
     args = parser.parse_args()
@@ -237,19 +244,27 @@ def main() -> None:
             "--spec", str(args.spec),
             "--output", str(args.output),
         ])
-    else:
-        _run([
-            sys.executable,
-            str(FAILURE_ANALYSIS_DIR / "check_val_gate.py"),
-            "--mode", "openhands",
-            "--baseline-traces", str(args.baseline_traces),
-            "--baseline-eval", str(args.baseline_eval),
-            "--current-traces", str(args.current_traces),
-            "--current-eval", str(args.current_eval),
-            "--val-ids", str(args.ids_file),
-            "--plan-spec", str(args.plan_spec),
-            "--output", str(args.output),
-        ])
+    elif args.stage == "gate":
+        from failure_analysis.loop_policy import compare_runs, decide_promotion
+
+        audit_result = json.loads(args.audit.read_text())
+        if not isinstance(audit_result, dict) or type(audit_result.get("passed")) is not bool:
+            parser.error("--audit must contain an audit JSON object with a boolean passed field")
+        comparison = compare_runs(
+            mode="openhands", split="val", ids_file=args.ids_file,
+            baseline_eval=args.baseline_eval, current_eval=args.current_eval,
+            baseline_traces=args.baseline_traces, current_traces=args.current_traces,
+            spec_path=args.plan_spec,
+        )
+        result = comparison | decide_promotion(audit_result, {}, comparison, **{
+            key: getattr(args, key) for key in (
+                "min_improvement", "min_target_metrics", "max_error_rate_delta", "max_invalid_rate_delta",
+            )
+        }) | {"promotion_policy": "swe_shared", "audit_path": str(args.audit.resolve())}
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        raise SystemExit(0 if result["passed"] else 1)
 
 
 if __name__ == "__main__":

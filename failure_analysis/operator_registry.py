@@ -81,6 +81,13 @@ OPENHANDS_ALLOWED_PATHS: dict[str, tuple[str, ...]] = {
     "gate": ("agent.py", "parsers/**", "verification/**", "hooks/**"),
 }
 
+# Only metrics computed by the OpenHands adapter can be repair targets.
+OPENHANDS_TARGET_METRICS = frozenset({
+    "resolved_rate", "task_success_rate", "accuracy", "error_rate",
+    "repeated_command_rate", "missing_evidence_rate", "avg_instance_cost",
+    "avg_steps", "avg_api_calls",
+})
+
 DEFECT_CLASS_ALIASES = {
     "editing": "tool_affordance",
     "file_editing": "tool_affordance",
@@ -770,14 +777,22 @@ def operator_allowed_paths(mode: str, family: str) -> list[str]:
     return list(allowed)
 
 
+def filter_target_metrics(mode: str, metrics: list[str] | tuple[str, ...]) -> list[str]:
+    if mode == "openhands":
+        return [metric for metric in metrics if metric in OPENHANDS_TARGET_METRICS]
+    return list(metrics)
+
+
 def format_operator_registry_for_prompt(mode: str) -> str:
     lines = []
     for definition in OPERATOR_REGISTRY.values():
         allowed = operator_allowed_paths(mode, definition.family)
         allowed_text = ", ".join(allowed) if allowed else "(pipeline-only / memory-only)"
+        metrics = filter_target_metrics(mode, definition.target_metrics)
+        metrics_text = ", ".join(metrics) if metrics else "(none available)"
         lines.append(
             f"- {definition.family}: targets {', '.join(definition.target_defect_classes)} | "
-            f"metrics={', '.join(definition.target_metrics)} | allowed_paths={allowed_text}"
+            f"metrics={metrics_text} | allowed_paths={allowed_text}"
         )
     return "\n".join(lines)
 

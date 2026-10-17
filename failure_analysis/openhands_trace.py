@@ -3,10 +3,67 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def openhands_tool_call_id(event: dict[str, Any]) -> str | None:
+    value = (event.get("tool_call_id") or (event.get("tool_call") or {}).get("id")
+             or (event.get("action") or {}).get("tool_call_id")
+             or (event.get("observation") or {}).get("tool_call_id"))
+    return str(value) if value else None
+
+
+def pair_openhands_tool_events(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Resolve results within one conversation stream; never guess ambiguous IDs.
+
+    SDK action IDs take precedence over provider tool-call IDs, which can be
+    reused across responses. Explicit IDs must agree when both are available.
+    Older traces without action IDs can use a unique tool-call ID.
+    """
+    by_action_id: dict[str, list[int]] = defaultdict(list)
+    by_tool_id: dict[str, list[int]] = defaultdict(list)
+    for index, event in enumerate(events):
+        if event.get("kind") != "ActionEvent":
+            continue
+        if event.get("id"):
+            by_action_id[str(event["id"])].append(index)
+        tool_id = openhands_tool_call_id(event)
+        if tool_id:
+            by_tool_id[tool_id].append(index)
+
+    pairs: dict[int, dict[str, Any]] = {}
+    for index, event in enumerate(events):
+        if event.get("kind") not in {"ObservationEvent", "AgentErrorEvent", "UserRejectObservation"}:
+            continue
+        action_id = event.get("action_id")
+        tool_id = openhands_tool_call_id(event)
+        matched_by = "action_id" if action_id else "tool_call_id"
+        candidates = by_action_id.get(str(action_id), []) if action_id else by_tool_id.get(tool_id, [])
+        pair: dict[str, Any] = {"status": "unmatched", "action_index": None}
+        if not candidates:
+            pair["reason"] = "action_id_not_found" if action_id else ("tool_call_id_not_found" if tool_id else "missing_ids")
+        elif len(candidates) != 1:
+            pair.update(status="ambiguous", reason=f"duplicate_{matched_by}")
+        else:
+            action_index = candidates[0]
+            action = events[action_index]
+            action_tool_id = openhands_tool_call_id(action)
+            result_tool_name = event.get("tool_name") or (event.get("observation") or {}).get("tool_name")
+            action_tool_name = action.get("tool_name") or (action.get("action") or {}).get("tool_name")
+            if tool_id and action_tool_id and tool_id != action_tool_id:
+                pair.update(status="conflict", reason="tool_call_id_mismatch")
+            elif result_tool_name and action_tool_name and result_tool_name != action_tool_name:
+                pair.update(status="conflict", reason="tool_name_mismatch")
+            elif action_index >= index:
+                pair.update(status="conflict", reason="result_precedes_action")
+            else:
+                pair.update(status="matched", action_index=action_index, matched_by=matched_by)
+        pairs[index] = pair
+    return pairs
 
 
 def _response_message(response: dict[str, Any]) -> dict[str, Any]:

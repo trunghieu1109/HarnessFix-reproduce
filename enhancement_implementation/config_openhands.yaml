@@ -16,7 +16,7 @@ agent:
     - **Implementation spec JSON**: `$PLAN_JSON_PATH`
     - **Original codebase reference**: `$ORIGINAL_DIR`
       (read-only reference for comparison)
-    - **Train comparison feedback** (optional): `$REDO_FEEDBACK_PATH`
+    - **Train comparison feedback** (optional): `$TRAIN_COMPARE_PATH`
       If set, read the previous attempt's outcomes before choosing a new implementation.
 
     Example — reading the plan:
@@ -156,13 +156,18 @@ agent:
     Run: `python3 - << 'PYEOF'
     import json, os
     print(json.dumps(json.load(open(os.environ["PLAN_JSON_PATH"])), indent=2))
-    path = os.environ.get("REDO_FEEDBACK_PATH", "")
+    path = os.environ.get("TRAIN_COMPARE_PATH", "")
     if path:
         print('PREVIOUS ATTEMPT FEEDBACK')
         print(open(path).read())
     else:
         print('No redo feedback (first attempt).')
     PYEOF`
+
+    If train feedback is supplied, use its net change and regressed/improved IDs to choose
+    a different implementation within the same plan/spec. Make regressions more targeted;
+    if the previous change had no effect, reconsider its active source path or approach.
+    This attempt starts from the current base, not from the previous attempt's edits.
 
     **Step 2** — Inspect the active source files and check the edit budget:
 
@@ -173,7 +178,7 @@ agent:
     **Step 3** — Implement improvements P0 → P1 → P2, following the JSON spec:
 
     For each fix:
-    1. State the required behavior delta and fix scope.
+    1. State the required behavior delta from the spec.
     2. Review the listed regression risks and the effect on currently-passing tasks.
     3. Edit only the allowed target paths and wire any new component into its caller.
     4. Run the fix's focused checks and resolve failures before continuing.
@@ -234,7 +239,7 @@ agent:
 
     Run: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/changes_summary.md`
 
-step_limit: 50
+step_limit: 150
 cost_limit: 5
 
 model:

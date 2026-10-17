@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.diagnosis_fixtures import valid_diagnosis
+
 
 def valid_spec() -> dict:
     return {
@@ -63,12 +65,9 @@ class AggregateRetryTests(unittest.TestCase):
         self.output = self.root / "plan.md"
         self.spec_output = self.root / "plan.json"
         self.results = self.root / "analysis.jsonl"
-        self.results.write_text(json.dumps({
-            "instance_id": "failed-task",
-            "failure_category": "unresolved",
-            "affected_component": "prompts",
-            "agent_design_issue": "Required tool arguments were omitted.",
-        }) + "\n")
+        self.results.write_text(json.dumps(valid_diagnosis(
+            "failed-task", affected_component="prompts", agent_design_issue="Required tool arguments were omitted.",
+        )) + "\n")
         self.models = []
         self.environments = []
 

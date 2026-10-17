@@ -53,22 +53,34 @@ def decide_promotion(audit: dict, train_compare: dict, val_compare: dict, *,
     """Match SWE: train and cost are reported; audit and validation decide."""
     baseline = val_compare.get("baseline_metrics", {}).get("metrics", {})
     current = val_compare.get("current_metrics", {}).get("metrics", {})
-    error_delta = current.get("error_rate", 0.0) - baseline.get("error_rate", 0.0)
-    invalid_delta = current.get("invalid_submission_rate", 0.0) - baseline.get("invalid_submission_rate", 0.0)
+    def rate_delta(metric: str) -> float | None:
+        if baseline.get(metric) is None or current.get(metric) is None:
+            return None
+        return current[metric] - baseline[metric]
+
+    error_delta = rate_delta("error_rate")
+    invalid_delta = rate_delta("invalid_submission_rate")
     target_improved = val_compare.get("target_metric_results", {}).get("improved_metric_count", 0)
     checks = {
         "audit_passed": bool(audit.get("passed", True)),
         "net_improvement": val_compare.get("net_change", 0) >= min_improvement,
         "target_metric_improved": target_improved >= min_target_metrics,
-        "error_delta_within_limit": error_delta <= max_error_rate_delta,
-        "invalid_delta_within_limit": invalid_delta <= max_invalid_rate_delta,
     }
+    skipped_checks = []
+    for name, delta, limit in (
+        ("error_delta_within_limit", error_delta, max_error_rate_delta),
+        ("invalid_delta_within_limit", invalid_delta, max_invalid_rate_delta),
+    ):
+        if delta is None:
+            skipped_checks.append(name)
+        else:
+            checks[name] = delta <= limit
     promoted = all(checks.values())
     return {
         "passed": promoted, "promoted": promoted,
         "decision": "promote" if promoted else "do_not_promote",
         "failure_reasons": [name for name, passed in checks.items() if not passed],
-        "checks": checks,
+        "checks": checks, "skipped_checks": skipped_checks,
         "val_net_change": val_compare.get("net_change"),
         "val_regression_count": val_compare.get("regression_count"),
         "val_improvement_count": val_compare.get("improvement_count"),

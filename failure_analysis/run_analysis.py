@@ -48,7 +48,7 @@ from failure_analysis.htir import (
 )
 from failure_analysis.artifact_sanitizer import sanitize_for_prompt, sanitized_trace_output_path, write_sanitized_artifact
 from failure_analysis.openhands_trace import load_openhands_trace, openhands_model_calls
-from failure_analysis.analysis_records import analysis_record_succeeded
+from failure_analysis.analysis_records import analysis_record_errors, analysis_record_succeeded
 from failure_analysis.prompt_safety import PromptSafeAgent, PromptSafeLocalEnvironment
 from failure_analysis.secret_redaction import redact_secrets
 from failure_analysis.operator_registry import (
@@ -399,6 +399,27 @@ def _fallback_analysis_output(
     return _enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path)
 
 
+def _finalize_analysis_output(
+    parsed: object, *, instance_id: str, failure_category: str, api_calls: int,
+    evidence_anchor: dict, bundle: dict, htir_path: Path,
+) -> dict:
+    # Check the submitted diagnosis before enrichment can fill missing fields.
+    errors = analysis_record_errors(
+        parsed, expected_instance_id=instance_id,
+        expected_failure_category=failure_category, htir_bundle=bundle,
+    )
+    if errors:
+        fallback = _fallback_analysis_output(
+            instance_id=instance_id, failure_category=failure_category,
+            exit_status="analysis_invalid_diagnosis", api_calls=api_calls,
+            evidence_anchor=evidence_anchor, htir_bundle=bundle, htir_path=htir_path,
+            reason="Invalid diagnosis: " + "; ".join(errors),
+        )
+        fallback["_analysis_validation_errors"] = errors
+        return fallback
+    return _enrich_analysis_output(dict(parsed), evidence_anchor, bundle, htir_path)
+
+
 # ── Shared utilities ────────────────────────────────────────────────────────────
 
 def load_failed_instances() -> dict[str, str]:
@@ -714,10 +735,10 @@ def run_analysis(
         fallback["_parse_error"] = True
         return fallback
 
-    parsed.setdefault("instance_id", instance_id)
-    parsed.setdefault("failure_category", failure_category)
-    parsed.setdefault("api_calls", agent.n_calls)
-    return _enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path)
+    return _finalize_analysis_output(
+        parsed, instance_id=instance_id, failure_category=failure_category, api_calls=agent.n_calls,
+        evidence_anchor=evidence_anchor, bundle=htir_bundle, htir_path=htir_path,
+    )
 
 
 # ── GAIA mode ───────────────────────────────────────────────────────────────────
@@ -915,9 +936,10 @@ def _gaia_run_analysis(
             "_parse_error": True,
         }
 
-    parsed.setdefault("instance_id", task_id)
-    parsed.setdefault("failure_category", failure_category)
-    return _enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path)
+    return _finalize_analysis_output(
+        parsed, instance_id=task_id, failure_category=failure_category, api_calls=agent.n_calls,
+        evidence_anchor=evidence_anchor, bundle=htir_bundle, htir_path=htir_path,
+    )
 
 
 # ── AppWorld mode ──────────────────────────────────────────────────────────────
@@ -1074,9 +1096,10 @@ def _appworld_run_analysis(
             "_parse_error": True,
         }
 
-    parsed.setdefault("instance_id", task_id)
-    parsed.setdefault("failure_category", failure_category)
-    return _enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path)
+    return _finalize_analysis_output(
+        parsed, instance_id=task_id, failure_category=failure_category, api_calls=agent.n_calls,
+        evidence_anchor=evidence_anchor, bundle=htir_bundle, htir_path=htir_path,
+    )
 
 
 # ── Terminal-Bench mode ────────────────────────────────────────────────────────
@@ -1239,9 +1262,10 @@ def _terminal_bench_run_analysis(
             "_parse_error": True,
         }
 
-    parsed.setdefault("instance_id", task_id)
-    parsed.setdefault("failure_category", failure_category)
-    return _enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path)
+    return _finalize_analysis_output(
+        parsed, instance_id=task_id, failure_category=failure_category, api_calls=agent.n_calls,
+        evidence_anchor=evidence_anchor, bundle=htir_bundle, htir_path=htir_path,
+    )
 
 
 
@@ -1397,13 +1421,18 @@ def _openhands_run_analysis(
                 htir_path=htir_path,
             )
             parsed["_parse_error"] = True
+        else:
+            parsed = _finalize_analysis_output(
+                parsed, instance_id=instance_id, failure_category=failure_category, api_calls=agent.n_calls,
+                evidence_anchor=evidence_anchor, bundle=htir_bundle, htir_path=htir_path,
+            )
     parsed.setdefault("instance_id", instance_id)
     parsed.setdefault("failure_category", failure_category)
     manifest = _openhands_manifest(paths)
     parsed.setdefault("task_instance_id", manifest.get("task_instance_id"))
     parsed.setdefault("rollout_id", manifest.get("rollout_id"))
     parsed.setdefault("api_calls", agent.n_calls)
-    return redact_secrets(_enrich_analysis_output(parsed, evidence_anchor, htir_bundle, htir_path))
+    return redact_secrets(parsed)
 
 
 def main():

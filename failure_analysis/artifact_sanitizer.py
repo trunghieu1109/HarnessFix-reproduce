@@ -66,7 +66,11 @@ def _drop_key(key: str, value: Any, parent: dict[str, Any], path: tuple[str, ...
         return True
     if key in {"tool_calls", "function_call"} and value in (None, [], {}):
         return True
-    if _looks_like_provider_response(parent) and key in PROVIDER_METADATA_KEYS | {"choices"}:
+    # Normalized calls deliberately carry model/usage beside request evidence.
+    # The provider-response heuristic also matches those records, but stripping
+    # their metadata would remove evidence that has no remaining raw duplicate.
+    normalized_call = bool(path and path[-1] == "model_calls")
+    if not normalized_call and _looks_like_provider_response(parent) and key in PROVIDER_METADATA_KEYS | {"choices"}:
         return True
     return False
 

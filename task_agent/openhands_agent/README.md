@@ -19,6 +19,29 @@ Better Harness accepts one `agent_file` in Docker mode. The bridge therefore
 packs the complete candidate directory into a deterministic, self-extracting
 Python launcher. It does not patch Better Harness or OpenHands.
 
+## Modify retries with train feedback
+
+The OpenHands modifier uses the train-feedback loop also used by GAIA, AppWorld, and
+Terminal-Bench. Aggregate creates one plan/spec per iteration. The modifier starts from
+the current accepted base, passes audit and the SDK initialization check, then runs train.
+If `train_net_change > 0`, the candidate proceeds to validation. Otherwise, the next modifier
+starts from the same base with the same plan/spec and the previous train comparison supplied
+as `$TRAIN_COMPARE_PATH` (`modify --train-compare`, also accepted as `--redo-feedback`).
+The feedback contains net change and improved/regressed rollout IDs. Prior edits and the
+previous modifier conversation are not carried forward.
+
+`pipeline.max_modify_retries: 2` is the default: one initial modification plus two train-feedback
+retries. Set it to `0` to disable these retries. If none improves train, the last candidate still
+proceeds to validation when audit and initialization checks pass; attempts are not ranked by train
+score. Validation promotion and final selection keep the shared SWE policy. Held-out test results
+are never used for retries. The modifier has a 150-call step limit and a $5 cost limit per session.
+
+Each train attempt is retained under `iterations/vN/train_attempts/<retry>/`, with its candidate,
+modifier trajectory, checks, train run, and comparison. Separate rollout versions prevent the task
+runtime from resuming another attempt's traces. Only the selected attempt is published as `hN`,
+and its train run is reused if it becomes the base. Resuming preserves completed attempts and
+feedback. Iteration reports record all attempts and `selected_modify_retry`.
+
 ## Candidate initialization retries
 
 The closed-loop runner audits each proposed candidate, then imports the packed launcher and
@@ -31,12 +54,13 @@ credentials; it does not make a request to the served model.
 An import/build failure retries generation of the same version with the original context:
 the same accepted base, plan/spec, prompts, references, model settings, and target directory.
 Each retry starts a fresh modifier session. No previous candidate error, traceback, diff, or
-conversation is added to its input; the pipeline does not pass `--redo-feedback` for these retries.
+conversation is added to its input. If this is already a train-feedback attempt, its existing
+train comparison stays unchanged throughout initialization retries.
 `pipeline.max_candidate_retries: 2` permits one initial proposal and two retries;
 `pipeline.candidate_check_timeout: 60` bounds each initialization check in seconds.
 Train/validation scores do not trigger this retry. Audit rejections retain the outer-loop policy.
 
-Each attempt is retained under `iterations/vN/attempts/<attempt>/`, including its candidate,
+Each attempt is retained under `iterations/vN/train_attempts/<retry>/attempts/<attempt>/`, including its candidate,
 modifier trajectory, audit, and `candidate_check.json`. The target directory is moved into the
 attempt archive after generation so the next modifier starts with a fresh copy at the same path.
 After retries are exhausted, the iteration report records `candidate_initialization_failed`
@@ -157,7 +181,15 @@ python -B run_pipeline_openhands.py gate `
   --current-eval artifacts\refactorbench\val_h1\results.json `
   --ids-file artifacts\refactorbench\val_ids.txt `
   --plan-spec artifacts\refactorbench\plan.json `
+  --audit artifacts\refactorbench\h1_audit.json `
   --output artifacts\refactorbench\val_gate.json
 ```
+
+The standalone gate uses the same SWE promotion policy as the closed loop and requires
+the candidate's audit result. It checks net gain, target-metric improvement, and measured
+error/invalid-rate deltas; cost is reported only. For a run with custom promotion thresholds,
+pass matching `--min-improvement`, `--min-target-metrics`, `--max-error-rate-delta`, and
+`--max-invalid-rate-delta` values. Missing or partially recorded OpenHands cost is reported
+as `null` and excluded from target-metric comparisons; a recorded zero remains valid.
 
 Keep the final test split outside analysis, repair, and validation retries.

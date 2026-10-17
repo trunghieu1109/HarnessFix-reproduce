@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,10 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from failure_analysis.openhands_trace import event_response_key, openhands_api_call_count, openhands_model_calls
+from failure_analysis.openhands_trace import (
+    event_response_key, openhands_api_call_count, openhands_model_calls,
+    openhands_tool_call_id, pair_openhands_tool_events,
+)
 from failure_analysis.secret_redaction import redact_secrets
 
 
@@ -37,8 +41,7 @@ def _bounded(value: Any, limit: int) -> Any:
 
 
 def _tool_call_id(event: dict) -> str | None:
-    return (event.get("tool_call_id") or (event.get("action") or {}).get("tool_call_id")
-            or (event.get("observation") or {}).get("tool_call_id"))
+    return openhands_tool_call_id(event)
 
 
 def _tool_name(tool: dict) -> str | None:
@@ -54,6 +57,7 @@ def _event_line(index: int, event: dict, preview_limit: int) -> str:
         ("source", event.get("source")),
         ("response_id", event.get("llm_response_id")),
         ("tool_call_id", _tool_call_id(event)),
+        ("action_id", event.get("action_id")),
         ("tool", event.get("tool_name") or observation.get("tool_name")),
         ("action", action.get("kind")),
     ):
@@ -79,7 +83,7 @@ def _event_line(index: int, event: dict, preview_limit: int) -> str:
 
 
 def select_evidence(trace: dict, event_indices: list[int], response_ids: list[str]) -> tuple[list[tuple[int, dict]], list[dict]]:
-    """Include the selected calls and their actions/results, paired by tool_call_id."""
+    """Include response siblings and only unambiguously associated tool results."""
     events = trace.get("events") or []
     calls = openhands_model_calls(trace)
     for index in event_indices:
@@ -91,18 +95,30 @@ def select_evidence(trace: dict, event_indices: list[int], response_ids: list[st
             raise ValueError(f"response_id {response_id!r} is not recorded; inspect the timeline first")
     selected_indices = set(event_indices)
     selected_ids = set(response_ids)
-    paired_ids = {_tool_call_id(events[index]) for index in selected_indices} - {None}
+    response_events: dict[str, list[int]] = defaultdict(list)
+    paired_events: dict[int, list[int]] = defaultdict(list)
     for index, event in enumerate(events):
-        if index in selected_indices or (_tool_call_id(event) and _tool_call_id(event) in paired_ids):
-            selected_indices.add(index)
-            if event.get("llm_response_id"):
-                selected_ids.add(event["llm_response_id"])
-    for index, event in enumerate(events):
-        if event.get("llm_response_id") in selected_ids:
-            selected_indices.add(index)
-            if _tool_call_id(event):
-                paired_ids.add(_tool_call_id(event))
-    selected_indices.update(index for index, event in enumerate(events) if _tool_call_id(event) in paired_ids)
+        if event.get("kind") == "ActionEvent" or (event.get("kind") == "MessageEvent" and event.get("source") == "agent"):
+            response_events[event_response_key(event, index)].append(index)
+    for index, pair in pair_openhands_tool_events(events).items():
+        if pair["status"] == "matched":
+            action_index = pair["action_index"]
+            paired_events[index].append(action_index)
+            paired_events[action_index].append(index)
+    selected_indices.update(index for response_id in selected_ids for index in response_events[response_id])
+    pending = deque(selected_indices)
+    while pending:
+        index = pending.popleft()
+        related = list(paired_events[index])
+        event = events[index]
+        if event.get("kind") == "ActionEvent" or (event.get("kind") == "MessageEvent" and event.get("source") == "agent"):
+            response_id = event_response_key(event, index)
+            selected_ids.add(response_id)
+            related.extend(response_events[response_id])
+        for related_index in related:
+            if related_index not in selected_indices:
+                selected_indices.add(related_index)
+                pending.append(related_index)
     selected_calls = [call for call in calls if str(call["response_id"]) in selected_ids]
     return [(index, events[index]) for index in sorted(selected_indices)], selected_calls
 
@@ -115,6 +131,8 @@ def _call_projection(call: dict, message_limit: int, field_limit: int) -> dict:
     tools = payload.get("tools") or []
     projection = {
         "response_id": call["response_id"],
+        "model": call.get("model"),
+        "usage": call.get("usage"),
         "source_ref": call.get("source_ref"),
         "request_evidence": call.get("request_evidence"),
         "response_evidence": call.get("response_evidence"),
@@ -132,7 +150,7 @@ def _call_projection(call: dict, message_limit: int, field_limit: int) -> dict:
         if key in payload:
             value = payload[key]
             projection[f"request_payload.{key}"] = value[-message_limit:] if isinstance(value, list) else value
-    for key in ("original_response_message", "generation_settings", "usage", "error"):
+    for key in ("original_response_message", "generation_settings", "error"):
         if call.get(key):
             projection[key] = call[key]
     bounded = _bounded(projection, field_limit)
@@ -147,6 +165,7 @@ def render_trace(trace: dict, *, event_indices: list[int] | None = None, respons
     trace = redact_secrets(trace)
     events = trace.get("events") or []
     calls = openhands_model_calls(trace)
+    associations = pair_openhands_tool_events(events)
     event_response_ids = {event_response_key(event, index) for index, event in enumerate(events)
                           if event.get("kind") == "ActionEvent"
                           or (event.get("kind") == "MessageEvent" and event.get("source") == "agent")}
@@ -169,6 +188,8 @@ def render_trace(trace: dict, *, event_indices: list[int] | None = None, respons
                 # Shared response reasoning is shown once in the model-call record.
                 payload = {key: value for key, value in event.items()
                            if key not in {"thought", "reasoning_content", "llm_response", "log_data"}}
+                if index in associations:
+                    payload["association"] = associations[index]
                 lines.append(json.dumps({"event_index": index, "source_ref": f"trace.events[{index}]",
                                          "event": _bounded(payload, limit)}, ensure_ascii=False))
             lines.append("SELECTED MODEL CALLS (request_messages uses the plural key)")
@@ -183,14 +204,21 @@ def render_trace(trace: dict, *, event_indices: list[int] | None = None, respons
     else:
         visible = [(index, event) for index, event in enumerate(events) if event.get("kind") not in METADATA_EVENTS]
         prefix = header + "TIMELINE (original event indices; completion/state metadata excluded)\n"
-        lines = [_event_line(index, event, 180) for index, event in visible]
+        def timeline_line(index: int, event: dict, limit: int) -> str:
+            line = _event_line(index, event, limit)
+            pair = associations.get(index)
+            if pair and pair["status"] != "matched":
+                line += f" association={pair['status']}:{pair['reason']}"
+            return line
+
+        lines = [timeline_line(index, event, 180) for index, event in visible]
         output = prefix + "\n".join(lines) + "\n"
         # Shrink previews before dropping chronology from the summary.
         if char_limit > 0 and len(output) > char_limit:
-            bare_lines = [_event_line(index, event, 0) for index, event in visible]
+            bare_lines = [timeline_line(index, event, 0) for index, event in visible]
             budget = max(0, char_limit - len(prefix) - sum(len(line) + 1 for line in bare_lines))
             preview_limit = min(180, budget // max(1, len(visible)))
-            output = prefix + "\n".join(_event_line(index, event, preview_limit) for index, event in visible) + "\n"
+            output = prefix + "\n".join(timeline_line(index, event, preview_limit) for index, event in visible) + "\n"
     if char_limit > 0 and len(output) > char_limit:
         marker = "\n... [output truncated; select fewer response IDs/events or raise --char-limit]\n"
         output = output[: max(0, char_limit - len(marker))] + marker
