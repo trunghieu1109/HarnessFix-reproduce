@@ -8,7 +8,7 @@ output_root: artifacts/openhands
 
 models:
   task: qwen-vllm
-  analysis: gemini-api
+  analysis: gpt-proposer
 
 repair_references:
   sdk_reference: true
@@ -25,7 +25,7 @@ execution:
     train: 1
     val: 1
     test: 2
-  agent_batch_size: 2
+  agent_batch_size: 5
   eval_batch_size: 6
   success_threshold: 1.0
 

@@ -62,7 +62,7 @@
     "max_output_tokens": 8192,
     "litellm_provider": "openai",
     "mode": "chat",
-    "api_base": "https://hieucolab8000.iselab.site/v1",
+    "api_base": "http://137.175.22.196:46945/v1",
     "api_key_env": "QWEN_API_KEY",
     "config_name": "swebench_xml.yaml",
     "model_class": "litellm_textbased",
@@ -73,7 +73,7 @@
       "timeout": 300,
       "max_retries": 0,
       "drop_params": true,
-      "api_base": "https://hieucolab8000.iselab.site/v1",
+      "api_base": "http://137.175.22.196:46945/v1",
       "extra_body": {
         "chat_template_kwargs": {
           "enable_thinking": false

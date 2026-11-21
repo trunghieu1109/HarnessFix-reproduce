@@ -29,7 +29,7 @@ execution:
     train: 1
     val: 1
     test: 2
-  agent_batch_size: 6
+  agent_batch_size: 5
   eval_batch_size: 6
   success_threshold: 1.0
 
@@ -38,7 +38,7 @@ pipeline:
   analysis_step_limit: 30  # Model calls per diagnosis, including submission.
   max_candidate_retries: 2  # Retry generation with the same context on import/build failure.
   candidate_check_timeout: 60
-  max_iterations: 3
+  max_iterations: 10
   max_promotion_failures: 2
   analysis_workers: 1
   min_improvement: 1

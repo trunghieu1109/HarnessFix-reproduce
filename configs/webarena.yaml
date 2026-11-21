@@ -9,9 +9,9 @@ output_root: artifacts/openhands
 
 models:
   task: qwen-vllm
-  analysis: gemini-api
+  analysis: gpt-proposer
 # Required for fuzzy_match tasks by Better Harness's existing WebArena evaluator.
-eval_model: gemini-api
+eval_model: gpt-proposer
 
 # Technical documentation for HarnessFix repair stages.
 repair_references:

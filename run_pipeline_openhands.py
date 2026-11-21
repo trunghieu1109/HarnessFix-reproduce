@@ -100,6 +100,11 @@ def main() -> None:
     run.add_argument("--config", type=Path, required=True)
     run.add_argument("--run-dir", type=Path)
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument(
+        "--allow-resume-mismatch",
+        action="store_true",
+        help="Resume an existing run after an intentional pipeline/config source change.",
+    )
 
     test = subparsers.add_parser("test", help="Evaluate the selected candidate after a completed repair loop")
     test.add_argument("--run-dir", type=Path, required=True)
@@ -167,7 +172,12 @@ def main() -> None:
         from task_agent.openhands_agent.pipeline import run_from_config, test_selected
 
         if args.stage == "run":
-            run_from_config(args.config, run_dir=args.run_dir, dry_run=args.dry_run)
+            run_from_config(
+                args.config,
+                run_dir=args.run_dir,
+                dry_run=args.dry_run,
+                allow_resume_mismatch=args.allow_resume_mismatch,
+            )
         else:
             test_selected(args.run_dir.resolve())
         return

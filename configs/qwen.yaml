@@ -9,8 +9,9 @@ api_key_env: QWEN_API_KEY
 max_input_tokens: 120000
 max_output_tokens: 8192
 temperature: 0.2
-# vLLM controls thinking through the chat template, rather than reasoning_effort.
-reasoning_effort: null
+# Keep the client-side reasoning dial at the minimum and also disable Qwen's
+# thinking template below. The two settings cover both LiteLLM and vLLM paths.
+reasoning_effort: none
 extra_body:
   chat_template_kwargs:
     enable_thinking: false

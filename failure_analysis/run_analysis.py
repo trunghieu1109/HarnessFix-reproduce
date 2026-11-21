@@ -86,6 +86,7 @@ CONFIG_PATH_OPENHANDS = ANALYSIS_DIR / "analysis_config_openhands.yaml"
 IMPL_DOC_PATH = ANALYSIS_DIR / "task_agent_impl_doc.md"
 
 DEFAULT_MODEL = "openai/gpt-5-mini"
+ANALYSIS_INVALID_DIAGNOSIS_RETRIES = 3
 
 # Module-level path overrides (set by main() when CLI args are provided)
 _TRACES_DIR_OVERRIDE: Path | None = None
@@ -1363,75 +1364,109 @@ def _openhands_run_analysis(
     )
     htir_path = write_bundle(htir_bundle, _htir_output_path(instance_id))
 
-    agent_config = _agent_config_from_analysis_config(config)
-    agent_config["output_path"] = paths["output_path"]
     env_config = config.get("environment", {})
     model_config = config.get("model", {})
-    model = LitellmTextbasedModel(
-        model_name=model_name,
-        observation_template=model_config.get("observation_template", ""),
-        format_error_template=model_config.get("format_error_template", ""),
-        action_regex=model_config.get("action_regex", ""),
-        model_kwargs=model_config.get("model_kwargs", {}) | (
-            selected_model_kwargs() if os.environ.get("HARNESSFIX_MODEL_ALIAS") else {}
-        ),
-        cost_tracking="ignore_errors",
+    agent_config = _agent_config_from_analysis_config(config)
+    agent_config["output_path"] = paths["output_path"]
+    analysis_input = dict(
+        instance_id=instance_id,
+        failure_category=failure_category,
+        traj_path=str(sanitized_traj_path),
+        raw_traj_path=paths["raw_traj_path"],
+        manifest_path=paths["manifest_path"],
+        htir_path=str(htir_path),
+        impl_doc=impl_doc,
+        task_description=redact_secrets(task_description),
+        technical_references=technical_reference_prompt(),
+        **_agent_source_context("openhands"),
     )
-    agent = PromptSafeAgent(model, _make_analysis_environment(env_config), **agent_config)
-    logger.info(f"Running OpenHands analysis for {instance_id} ({failure_category})")
-    try:
-        result = agent.run(
-            instance_id=instance_id,
-            failure_category=failure_category,
-            traj_path=str(sanitized_traj_path),
-            raw_traj_path=paths["raw_traj_path"],
-            manifest_path=paths["manifest_path"],
-            htir_path=str(htir_path),
-            impl_doc=impl_doc,
-            task_description=redact_secrets(task_description),
-            technical_references=technical_reference_prompt(),
-            **_agent_source_context("openhands"),
+
+    # A malformed diagnosis must not abort the whole repair loop.  Retry with
+    # the same analysis input and expected failure category; only a valid
+    # diagnosis is accepted.  A fresh agent per attempt avoids carrying a
+    # malformed submission or conversation state into the next retry.
+    total_api_calls = 0
+    last_reason = "unknown analysis failure"
+    last_exit_status = "analysis_failed"
+    parsed = None
+    for attempt in range(ANALYSIS_INVALID_DIAGNOSIS_RETRIES + 1):
+        model = LitellmTextbasedModel(
+            model_name=model_name,
+            observation_template=model_config.get("observation_template", ""),
+            format_error_template=model_config.get("format_error_template", ""),
+            action_regex=model_config.get("action_regex", ""),
+            model_kwargs=model_config.get("model_kwargs", {}) | (
+                selected_model_kwargs() if os.environ.get("HARNESSFIX_MODEL_ALIAS") else {}
+            ),
+            cost_tracking="ignore_errors",
         )
-    except Exception as exc:
-        logger.error(f"Agent raised exception for {instance_id}: {redact_secrets(str(exc))}")
+        agent = PromptSafeAgent(model, _make_analysis_environment(env_config), **agent_config)
+        logger.info(
+            f"Running OpenHands analysis for {instance_id} ({failure_category}), "
+            f"attempt {attempt + 1}/{ANALYSIS_INVALID_DIAGNOSIS_RETRIES + 1}"
+        )
+        try:
+            result = agent.run(**analysis_input)
+            attempt_calls = agent.n_calls
+            total_api_calls += attempt_calls
+            submission = result.get("submission", "") or ""
+            logger.info(f"Submission for {instance_id}, attempt {attempt + 1}: {submission!r}")
+            candidate = parse_submission(submission)
+            if candidate is None:
+                last_reason = f"invalid JSON submission: {submission[:1000]}"
+                last_exit_status = result.get("exit_status", "analysis_parse_error")
+            else:
+                validation_errors = analysis_record_errors(
+                    candidate,
+                    expected_instance_id=instance_id,
+                    expected_failure_category=failure_category,
+                    htir_bundle=htir_bundle,
+                )
+                if not validation_errors:
+                    parsed = _enrich_analysis_output(candidate, evidence_anchor, htir_bundle, htir_path)
+                    parsed["api_calls"] = total_api_calls
+                    break
+                last_reason = "Invalid diagnosis: " + "; ".join(validation_errors)
+                last_exit_status = "analysis_invalid_diagnosis"
+                logger.warning(
+                    f"Invalid diagnosis for {instance_id} on attempt {attempt + 1}: {last_reason}"
+                )
+        except Exception as exc:
+            attempt_calls = getattr(agent, "n_calls", 0)
+            total_api_calls += attempt_calls
+            last_reason = str(exc)
+            last_exit_status = "analysis_agent_exception"
+            logger.error(
+                f"Agent raised exception for {instance_id} on attempt {attempt + 1}: "
+                f"{redact_secrets(str(exc))}"
+            )
+
+        if attempt < ANALYSIS_INVALID_DIAGNOSIS_RETRIES:
+            logger.info(
+                f"Retrying diagnosis for {instance_id} with identical input "
+                f"({attempt + 1}/{ANALYSIS_INVALID_DIAGNOSIS_RETRIES} retries used)"
+            )
+
+    if parsed is None:
         parsed = _fallback_analysis_output(
             instance_id=instance_id,
             failure_category=failure_category,
-            exit_status="analysis_agent_exception",
-            api_calls=getattr(agent, "n_calls", 0),
-            reason=str(exc),
+            exit_status=last_exit_status,
+            api_calls=total_api_calls,
+            reason=last_reason,
             evidence_anchor=evidence_anchor,
             htir_bundle=htir_bundle,
             htir_path=htir_path,
         )
+        parsed["_analysis_retry_count"] = ANALYSIS_INVALID_DIAGNOSIS_RETRIES
     else:
-        submission = result.get("submission", "") or ""
-        logger.info(f"Submission for {instance_id}: {submission!r}")
-        parsed = parse_submission(submission)
-        if parsed is None:
-            logger.warning(f"Could not parse JSON from submission for {instance_id}")
-            parsed = _fallback_analysis_output(
-                instance_id=instance_id,
-                failure_category=failure_category,
-                exit_status=result.get("exit_status", "analysis_parse_error"),
-                api_calls=agent.n_calls,
-                reason=f"invalid JSON submission: {submission[:1000]}",
-                evidence_anchor=evidence_anchor,
-                htir_bundle=htir_bundle,
-                htir_path=htir_path,
-            )
-            parsed["_parse_error"] = True
-        else:
-            parsed = _finalize_analysis_output(
-                parsed, instance_id=instance_id, failure_category=failure_category, api_calls=agent.n_calls,
-                evidence_anchor=evidence_anchor, bundle=htir_bundle, htir_path=htir_path,
-            )
+        parsed["_analysis_retry_count"] = attempt
     parsed.setdefault("instance_id", instance_id)
     parsed.setdefault("failure_category", failure_category)
     manifest = _openhands_manifest(paths)
     parsed.setdefault("task_instance_id", manifest.get("task_instance_id"))
     parsed.setdefault("rollout_id", manifest.get("rollout_id"))
-    parsed.setdefault("api_calls", agent.n_calls)
+    parsed.setdefault("api_calls", total_api_calls)
     return redact_secrets(parsed)
 
 

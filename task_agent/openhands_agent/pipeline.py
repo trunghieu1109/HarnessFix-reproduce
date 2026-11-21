@@ -82,7 +82,9 @@ def _invoke(command: list[str], accepted_codes: tuple[int, ...] = (0,)) -> None:
 
 
 class OpenHandsPipeline:
-    def __init__(self, config: dict, *, run_dir: Path | None = None):
+    def __init__(self, config: dict, *, run_dir: Path | None = None,
+                 allow_resume_mismatch: bool = False):
+        self.allow_resume_mismatch = allow_resume_mismatch
         settings = dict(dotenv_values(REPO_ROOT / ".env")) | dict(os.environ)
         config = dict(config)
         better_value = str(config["better_root"])
@@ -199,7 +201,7 @@ class OpenHandsPipeline:
         snapshot_path = self.root / "experiment.json"
         if snapshot_path.exists():
             previous = json.loads(snapshot_path.read_text())
-            if previous["fingerprint"] != self.fingerprint:
+            if previous["fingerprint"] != self.fingerprint and not allow_resume_mismatch:
                 raise ValueError("Config, data, model settings or pipeline changed. Use a new --run-dir.")
         elif self.root.exists() and any(self.root.iterdir()):
             raise FileExistsError(f"Run directory is not an OpenHands pipeline experiment: {self.root}")
@@ -234,7 +236,11 @@ class OpenHandsPipeline:
     def _stage(self, name: str, outputs: list[Path], action: Callable[[], None]) -> None:
         # Children reload Better's model registry. Detect edits between stages,
         # so a long experiment cannot silently compare different parameters.
-        OpenHandsPipeline(self.config, run_dir=self.root)
+        OpenHandsPipeline(
+            self.config,
+            run_dir=self.root,
+            allow_resume_mismatch=self.allow_resume_mismatch,
+        )
         marker = self.root / "stages" / f"{name}.json"
         if marker.exists():
             cached = json.loads(marker.read_text())
@@ -707,9 +713,12 @@ class OpenHandsPipeline:
         return summary
 
 
-def run_from_config(config_path: Path, *, run_dir: Path | None = None, dry_run: bool = False) -> dict:
+def run_from_config(config_path: Path, *, run_dir: Path | None = None, dry_run: bool = False,
+                    allow_resume_mismatch: bool = False) -> dict:
     config = yaml.safe_load(config_path.read_text())
-    return OpenHandsPipeline(config, run_dir=run_dir).run(dry_run=dry_run)
+    return OpenHandsPipeline(
+        config, run_dir=run_dir, allow_resume_mismatch=allow_resume_mismatch
+    ).run(dry_run=dry_run)
 
 
 def test_selected(run_dir: Path) -> dict:
